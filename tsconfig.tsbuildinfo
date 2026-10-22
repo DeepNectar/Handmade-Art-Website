@@ -1,0 +1,1 @@
+{"root":["./src/AdminPanel.tsx","./src/App.tsx","./src/main.tsx","./src/notifications.ts","./src/vite-env.d.ts","./src/components/ImageUpload.tsx","./src/lib/cloudinary.ts","./src/lib/supabase.ts"],"version":"5.9.3"}

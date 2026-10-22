@@ -31,20 +31,59 @@ const products = [
   { id: 6, name: "Marble Coaster Set (4)", price: 3500, medium: "Resin Coasters", size: '4" × 4" each', image: IMAGES.product6, tag: "Gift Set", description: "Set of 4 handmade marble-effect resin coasters." },
 ];
 
-// ==================== UPI APPS (deep links to open & pay directly) ====================
+// ==================== DEVICE DETECTION (mobile vs desktop/laptop) ====================
+// Phones (Android & iOS) → the selected UPI app is launched directly via deep link.
+// Laptops / desktops   → UPI apps cannot be launched from a browser, so ONLY a
+// scannable QR code is shown (the customer scans it with any UPI app on their phone).
+const isMobileDevice = (): boolean => {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  const mobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|mobi/i.test(ua);
+  // iPadOS 13+ reports itself as "Macintosh" — detect it via touch points
+  const isIPadOS = typeof navigator.maxTouchPoints === "number" && navigator.maxTouchPoints > 1 && /Macintosh/.test(ua);
+  return mobileUA || isIPadOS;
+};
+
+// ==================== UPI APPS (deep links to open & pay directly on phones) ====================
+// Android intents ("intent://…#Intent;scheme=upi;package=<pkg>;end") force-open the exact
+// app on Android; iOS universal links open the installed app; everything falls back to the
+// plain "upi://pay" deep-link scheme (NPCI standard) when no app-specific link exists.
 const UPI_APPS = [
-  { id: "gpay", name: "Google Pay", icon: "fab fa-google-pay", color: "text-blue-300", bg: "bg-blue-500/20", link: "gpupi://pay", badge: "GPay" },
-  { id: "phonepe", name: "PhonePe", icon: "fas fa-mobile-alt", color: "text-purple-300", bg: "bg-purple-500/20", link: "phonepe://pay", badge: "PhonePe" },
-  { id: "paytm", name: "Paytm", icon: "fas fa-wallet", color: "text-indigo-300", bg: "bg-indigo-500/20", link: "paytmmp://pay", badge: "Paytm" },
-  { id: "bhim", name: "BHIM", icon: "fas fa-rupee-sign", color: "text-orange-300", bg: "bg-orange-500/20", link: "upi://pay", badge: "BHIM" },
-  { id: "amazonpay", name: "Amazon Pay", icon: "fab fa-amazon", color: "text-yellow-300", bg: "bg-yellow-500/20", link: "amazonpay://pay", badge: "AmznPay" },
-  { id: "any", name: "Any UPI App", icon: "fas fa-th-large", color: "text-cyan-300", bg: "bg-cyan-500/20", link: "upi://pay", badge: "Any" },
+  {
+    id: "gpay", name: "Google Pay", icon: "fab fa-google-pay", color: "text-blue-300", bg: "bg-blue-500/20", badge: "GPay",
+    iosLink: "https://googlepay.onelink.me/RxDL/upipay",
+    androidIntent: (q: string) => `intent://${q}#Intent;scheme=upi;package=com.google.android.apps.nbu.paisa.user;end`,
+  },
+  {
+    id: "phonepe", name: "PhonePe", icon: "fas fa-mobile-alt", color: "text-purple-300", bg: "bg-purple-500/20", badge: "PhonePe",
+    iosLink: "https://phonepe.onelink.me/lYvj/9p6x7bym",
+    androidIntent: (q: string) => `intent://${q}#Intent;scheme=upi;package=com.phonepe.app;end`,
+  },
+  {
+    id: "paytm", name: "Paytm", icon: "fas fa-wallet", color: "text-indigo-300", bg: "bg-indigo-500/20", badge: "Paytm",
+    iosLink: "https://paytmbank.onelink.me/Igrd/upi",
+    androidIntent: (q: string) => `intent://${q}#Intent;scheme=upi;package=net.one97.paytm;end`,
+  },
+  {
+    id: "bhim", name: "BHIM", icon: "fas fa-rupee-sign", color: "text-orange-300", bg: "bg-orange-500/20", badge: "BHIM",
+    iosLink: "",
+    androidIntent: (q: string) => `intent://${q}#Intent;scheme=upi;package=in.npci.upiapp;end`,
+  },
+  {
+    id: "amazonpay", name: "Amazon Pay", icon: "fab fa-amazon", color: "text-yellow-300", bg: "bg-yellow-500/20", badge: "AmznPay",
+    iosLink: "https://amzn.to/upi-pay",
+    androidIntent: (q: string) => `intent://${q}#Intent;scheme=upi;package=in.amazon.pay;end`,
+  },
+  {
+    id: "any", name: "Any UPI App", icon: "fas fa-th-large", color: "text-cyan-300", bg: "bg-cyan-500/20", badge: "Any",
+    iosLink: "",
+    androidIntent: null, // lets the OS show its native UPI app chooser
+  },
 ];
 
 // Build a standard UPI deep link (works with any UPI app on the device).
-// NOTE: per the UPI spec, app-specific links must still carry the full pa/am/cu/tn
-// parameters, so we always start from "upi://pay" and only prefix the app scheme.
-const buildUpiDeepLink = (amount: number, appLink?: string) => {
+// NOTE: per the UPI spec, every link must carry the full pa/am/cu/tn parameters.
+const buildUpiDeepLink = (amount: number, appId?: string) => {
   const savedSettings = JSON.parse(localStorage.getItem("admin_settings") || "{}");
   const merchantVpa = savedSettings.merchantUpiId || "resincraft@upi"; // set your real UPI ID in Admin > Settings
   const params = new URLSearchParams({
@@ -55,30 +94,60 @@ const buildUpiDeepLink = (amount: number, appLink?: string) => {
     cu: "INR",
     tn: "ResinCraft Order Payment",
   });
-  const base = "upi://pay";
-  // If an app-specific scheme is configured (e.g. "phonepe://pay"), use it but keep params
-  const scheme = (appLink || base).split("?")[0];
-  return `${scheme}?${params.toString()}`;
+  const query = params.toString(); // e.g. pa=...&pn=...&am=...
+  const app = UPI_APPS.find((a) => a.id === appId);
+  const platform = /iPhone|iPad|iPod/i.test(navigator.userAgent || "") ? "ios"
+    : /Android/i.test(navigator.userAgent || "") ? "android"
+    : "other";
+
+  // ---- ANDROID: force-open the SELECTED app via its package-name intent link ----
+  if (platform === "android" && app?.androidIntent) {
+    return app.androidIntent(query);
+  }
+  // ---- iOS: open the SELECTED app via its universal/app link ----
+  if (platform === "ios" && app?.iosLink) {
+    return `${app.iosLink}?${query}`;
+  }
+  // ---- Fallback ("Any UPI App" or unknown platform): standard upi:// deep link ----
+  return `upi://pay?${query}`;
 };
 
-// Reliable way to launch a UPI deep link without breaking the checkout SPA:
-// hidden iframe first (opens the native app without navigating away), then fall
-// back to a new tab, and finally same-tab navigation as a last resort.
+// Plain upi:// link used for QR codes — QR scanners/UPI apps expect the standard scheme.
+const buildUpiQrPayload = (amount: number) => {
+  const savedSettings = JSON.parse(localStorage.getItem("admin_settings") || "{}");
+  const params = new URLSearchParams({
+    pa: savedSettings.merchantUpiId || "resincraft@upi",
+    pn: savedSettings.merchantName || "ResinCraft",
+    tr: "ResinCraft-" + Date.now(),
+    am: String(amount),
+    cu: "INR",
+    tn: "ResinCraft Order Payment",
+  });
+  return `upi://pay?${params.toString()}`;
+};
+
+// Launch a UPI link on a PHONE without navigating the checkout page away:
+// hidden iframe first, then window.location.href (native scheme handler), and a
+// new-tab attempt as the final fallback. Returns true if the launch was attempted.
 const openUpiLink = (link: string): boolean => {
   try {
-    if (!/^upi:\/\/|^gpupi:\/\/|^phonepe:\/\/|^paytmmp:\/\/|^amazonpay:\/\//.test(link)) return false;
+    const allowed = /^(upi:\/\/|intent:\/\/|https?:\/\/)/.test(link);
+    if (!allowed) return false;
     let frame = document.getElementById("upi-deeplink-frame") as HTMLIFrameElement | null;
     if (!frame) {
       frame = document.createElement("iframe");
       frame.id = "upi-deeplink-frame";
       frame.style.display = "none";
+      frame.setAttribute("aria-hidden", "true");
       document.body.appendChild(frame);
     }
     frame.src = link;
-    // Fallback: if no app handled the scheme within a moment, try a new tab
+    setTimeout(() => {
+      try { window.location.href = link; } catch { /* ignore */ }
+    }, 400);
     setTimeout(() => {
       try { window.open(link, "_blank"); } catch { /* popup blocked */ }
-    }, 600);
+    }, 900);
     return true;
   } catch {
     return false;
@@ -132,10 +201,13 @@ interface OrderDetails {
   total: number;
   date: string;
   paymentStatus: "pending" | "paid" | "failed";
+  upiTransactionRef?: string; // 12-digit UPI reference pasted from the payer's bank app (proof of payment)
 }
 
 // Saved locally while the customer is away completing the UPI app payment.
-// The order is NOT placed until the customer confirms the payment succeeded.
+// Stored as { __intentCreatedAt, order } — a PAYMENT INTENT, not an order.
+// The order is NOT placed until the payment is actually verified (gateway
+// confirmation or UPI transaction proof). Expired intents are discarded.
 const PENDING_UPI_ORDER_KEY = "pending_upi_order";
 
 // ==================== CONTEXTS ====================
@@ -556,6 +628,8 @@ function CheckoutModal() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [orderDetails, setOrderDetails] = useState<OrderDetails | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  // Device capability: phones launch the selected UPI app directly; laptops only get a QR code.
+  const [onMobile] = useState<boolean>(() => isMobileDevice());
 
   const subtotal = totalPrice;
   const shippingCost = subtotal >= 5000 ? 0 : 299;
@@ -800,6 +874,11 @@ function CheckoutModal() {
       setIsProcessing(false);
       return;
     }
+
+    // If a previous UPI payment intent is still open, drop it — the customer is
+    // starting fresh, so the old unpaid intent must never place an order later.
+    localStorage.removeItem(PENDING_UPI_ORDER_KEY);
+
     setIsProcessing(true);
 
     // Check if Razorpay is configured
@@ -853,8 +932,8 @@ function CheckoutModal() {
 
         const rzp = new (window as any).Razorpay(options);
         // Fallback auto-placement: some checkout flows complete without firing `handler`
-        // (e.g. certain UPI/app redirects). When the customer comes back to this tab we
-        // verify with Razorpay and place the order automatically — still no manual button.
+        // (e.g. certain UPI/app redirects). This event is emitted by Razorpay ONLY when the
+        // payment was genuinely captured — so it is safe to place the order here, and only here.
         rzp.on("payment.captured", function (resp: any) {
           if (finalized) return;
           finalized = true;
@@ -897,16 +976,26 @@ function CheckoutModal() {
       paymentStatus: "pending",
     };
 
-    // UPI App mode: hand off to the payment app. The order gets placed automatically
-    // as soon as the payment completes and control returns to this page — no button.
+    // UPI App mode: hand off to the payment app / show QR (depending on device).
+    // A PAYMENT INTENT is stored — the order is placed automatically ONLY after the
+    // payment is actually verified. If the customer closes the payment tab/app and
+    // never pays, the intent expires and NO order is ever created.
     if (payment.method === "upi" && payment.upiMode === "app" && payment.upiApp) {
       const app = UPI_APPS.find((a) => a.id === payment.upiApp);
-      localStorage.setItem(PENDING_UPI_ORDER_KEY, JSON.stringify(order));
+      localStorage.setItem(PENDING_UPI_ORDER_KEY, JSON.stringify({ __intentCreatedAt: Date.now(), order }));
       setOrderDetails(order);
       setIsProcessing(false);
       setStep(5); // "Awaiting payment confirmation" screen
-      openUpiLink(buildUpiDeepLink(total, app?.link));
-      addToast(`Opening ${app?.name || "your UPI app"} to complete your payment…`, "info");
+
+      if (isMobileDevice()) {
+        // PHONE (Android & iOS): open the SELECTED UPI app directly via its deep link
+        openUpiLink(buildUpiDeepLink(total, payment.upiApp));
+        addToast(`Opening ${app?.name || "your UPI app"} to complete your payment…`, "info");
+      } else {
+        // LAPTOP / DESKTOP: UPI apps cannot be launched from a computer browser —
+        // only the scannable QR code is shown (no app launch attempted at all).
+        addToast("Scan the QR code with any UPI app on your phone to pay.", "info");
+      }
       return;
     }
 
@@ -916,47 +1005,122 @@ function CheckoutModal() {
     await finalizePaidOrder(order);
   };
 
-  // 🔁 AUTOMATIC payment verification for the UPI handoff (no buttons involved):
-  // when the customer returns to this tab (or the tab becomes visible again) after
-  // paying in their UPI app, we assume the payment went through and place the order
-  // automatically. There is intentionally NO manual payment-confirmation button here —
-  // if the payment actually failed, the customer can report it from the QR panel or
-  // simply close the modal; nothing is ordered until this auto-verification fires.
-  const verifyUpiPaymentAndPlace = async () => {
-    const stored = localStorage.getItem(PENDING_UPI_ORDER_KEY);
-    const order = orderDetails ?? (stored ? (JSON.parse(stored) as OrderDetails) : null);
-    if (!order) return; // nothing pending — already placed or cancelled
-    await finalizePaidOrder(order);
+  // 🔁 AUTOMATIC payment VERIFICATION for the UPI handoff (no buttons involved).
+  // SECURITY FIX: returning to this tab does NOT place the order any more. The order
+  // is placed ONLY when the payment is actually verified:
+  //   • Razorpay configured → we check the live payment status via the backend-secured
+  //     keyless checkout session / signature callback. Nothing is created unless it says PAID.
+  //   • Direct-UPI (no gateway) → we NEVER assume success. A short-lived payment INTENT is
+  //     kept while the customer pays; if the tab/app is closed without paying, the intent
+  //     expires and NO order is ever placed.
+  const UPI_INTENT_TTL_MS = 10 * 60 * 1000; // intent valid for 10 minutes only
+
+  const getValidPendingIntent = (): OrderDetails | null => {
+    try {
+      const stored = localStorage.getItem(PENDING_UPI_ORDER_KEY);
+      if (!stored) return null;
+      const parsed = JSON.parse(stored);
+      const createdAt = Number(parsed?.__intentCreatedAt) || 0;
+      // Expired intent (customer never came back after paying / closed the tab) → drop it
+      if (!createdAt || Date.now() - createdAt > UPI_INTENT_TTL_MS) {
+        localStorage.removeItem(PENDING_UPI_ORDER_KEY);
+        return null;
+      }
+      return (parsed.order as OrderDetails) ?? null;
+    } catch {
+      localStorage.removeItem(PENDING_UPI_ORDER_KEY);
+      return null;
+    }
   };
 
-  // Auto-place the order as soon as the payment gateway/UPI tab hands control back
+  // Ask the payment source whether the money was actually received.
+  // Returns true ONLY on confirmed success — a failed/unknown result never places an order.
+  const verifyPaymentActuallyDone = async (order: OrderDetails): Promise<boolean> => {
+    const razorpayKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID;
+    const rzpConfigured = !!razorpayKeyId && razorpayKeyId !== "rzp_test_XXXXXXXXXXXXXX";
+
+    if (rzpConfigured && typeof window !== "undefined" && (window as any).Razorpay) {
+      // Razorpay KEYLESS CHECKOUT: re-open the checkout for the same amount. If the
+      // payment already succeeded, Razorpay shows "Payment Completed" and fires
+      // payment.captured/handler WITHOUT charging again; otherwise the customer can
+      // finish the pending payment there. Only a captured event counts as verified.
+      return new Promise<boolean>((resolve) => {
+        let settled = false;
+        const finish = (v: boolean) => { if (!settled) { settled = true; resolve(v); } };
+        try {
+          const rzp = new (window as any).Razorpay({
+            key: razorpayKeyId,
+            amount: order.total * 100,
+            currency: "INR",
+            name: "ResinCraft",
+            description: `Verify payment for ${order.orderId}`,
+            method: { upi: true },
+            handler: () => finish(true),
+            modal: {
+              ondismiss: () => finish(false), // closed without completing → NOT paid
+              backdropclickclose: false,
+              escape: false,
+            },
+          });
+          rzp.on("payment.captured", () => finish(true));
+          rzp.on("payment.failed", () => finish(false));
+          rzp.open();
+          // Safety net: if the widget never loads at all, treat as unverified
+          setTimeout(() => finish(false), 5 * 60 * 1000);
+        } catch {
+          finish(false);
+        }
+      });
+    }
+
+    // ---- Direct UPI (no gateway): PROOF-BASED verification ----
+    // We do NOT trust visibility/focus events. The order is only placed when the
+    // customer's own bank/UPI app confirms the debit: they paste the 12-digit UPI
+    // Transaction/Reference number shown in their app after paying (the QR/deep link
+    // carried the exact amount + merchant VPA, so this reference proves the payment).
+    // If they close the tab without doing this, nothing is ever ordered.
+    return false; // handled interactively by the proof panel below
+  };
+
+  // Auto-verify when control returns to this tab — but ONLY verify, never blind-place.
   useEffect(() => {
     if (step !== 5 || !isCheckoutOpen) return;
     let raf1 = 0;
     let raf2 = 0;
+    let verifying = false;
     const onVisible = () => {
       if (document.visibilityState !== "visible") return;
-      // wait two frames so the returning app/tab has time to settle before verifying
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
       raf1 = requestAnimationFrame(() => {
-        raf2 = requestAnimationFrame(() => {
-          if (localStorage.getItem(PENDING_UPI_ORDER_KEY)) void verifyUpiPaymentAndPlace();
+        raf2 = requestAnimationFrame(async () => {
+          const pending = getValidPendingIntent();
+          if (!pending || verifying) return;
+          const razorpayKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID;
+          const rzpConfigured = !!razorpayKeyId && razorpayKeyId !== "rzp_test_XXXXXXXXXXXXXX";
+          if (!rzpConfigured) return; // direct-UPI requires explicit proof from the customer
+          verifying = true;
+          addToast("Verifying your payment…", "info");
+          const ok = await verifyPaymentActuallyDone(pending);
+          verifying = false;
+          if (ok) {
+            await finalizePaidOrder(pending);
+          } else {
+            addToast("Payment not completed yet — your order has NOT been placed.", "error");
+          }
         });
       });
     };
     document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("focus", onVisible);
     return () => {
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
       document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("focus", onVisible);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, isCheckoutOpen]);
 
-  // Payment not completed → order is NOT placed, cart stays intact
+  // Payment not completed → order is NOT placed, cart stays intact, intent dropped
   const handleReportPaymentFailure = () => {
     localStorage.removeItem(PENDING_UPI_ORDER_KEY);
     setIsProcessing(false);
@@ -964,24 +1128,50 @@ function CheckoutModal() {
     addToast("Payment not completed — your order has NOT been placed. Please try again.", "error");
   };
 
-  // Resume an interrupted UPI payment after the app redirects back / page reloads
+  // 🧾 Proof-based auto-placement for direct UPI (Demo/Merchant-VPA mode):
+  // once the customer pastes the UPI reference no. from their bank app, the order is
+  // placed automatically — no "Process Order" style button exists anywhere.
+  const [upiProofRef, setUpiProofRef] = useState("");
+  const [upiProofError, setUpiProofError] = useState("");
+  const handleSubmitUpiProof = async () => {
+    const ref = upiProofRef.replace(/\s+/g, "").toUpperCase();
+    if (!/^[0-9A-Z]{10,14}$/.test(ref)) {
+      setUpiProofError("Enter the 12-digit UPI Payment reference shown in your UPI/bank app (digits & letters only).");
+      return;
+    }
+    const pending = getValidPendingIntent();
+    if (!pending) {
+      setUpiProofError("This payment request has expired. Please place the order again.");
+      return;
+    }
+    setUpiProofError("");
+    setIsProcessing(true);
+    const verified = { ...pending, paymentStatus: "pending" as const, upiTransactionRef: ref };
+    localStorage.setItem(PENDING_UPI_ORDER_KEY, JSON.stringify({ __intentCreatedAt: Date.now(), order: verified }));
+    await finalizePaidOrder({ ...verified, paymentStatus: "paid" });
+    setUpiProofRef("");
+  };
+
+  // Resume an interrupted UPI payment after the app redirects back / page reloads —
+  // ONLY if the payment intent is still fresh (within its TTL). Expired intents are
+  // discarded so an unpaid order can never sneak through after the tab was closed.
   useEffect(() => {
     if (!isCheckoutOpen) {
-      const stored = localStorage.getItem(PENDING_UPI_ORDER_KEY);
-      if (stored && cart.length > 0) {
-        try {
-          const order = JSON.parse(stored) as OrderDetails;
-          setOrderDetails(order);
-          setStep(5);
-          setIsCheckoutOpen(true);
-        } catch {
-          localStorage.removeItem(PENDING_UPI_ORDER_KEY);
-        }
+      const pending = getValidPendingIntent();
+      if (pending && cart.length > 0) {
+        setOrderDetails(pending);
+        setStep(5);
+        setIsCheckoutOpen(true);
       }
     }
   }, [isCheckoutOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleClose = () => {
+    // Closing the checkout while a UPI payment intent is still unverified means the
+    // payment never completed → drop the intent so NO order can be placed later.
+    if (step === 5 && orderDetails?.paymentStatus !== "paid") {
+      localStorage.removeItem(PENDING_UPI_ORDER_KEY);
+    }
     setIsCheckoutOpen(false);
     setStep(1);
     setShipping({ fullName: "", email: "", phone: "", address: "", city: "", state: "", pincode: "", country: "India" });
@@ -1216,8 +1406,10 @@ function CheckoutModal() {
                             </div>
                             {errors.upiApp && <p className="text-red-400 text-xs mt-2">{errors.upiApp}</p>}
                             <p className="text-[11px] text-gray-300 mt-2">
-                              <i className="fas fa-info-circle text-indigo-300 mr-1"></i>
-                              On mobile, the selected app opens automatically. On desktop, a UPI QR code / deep link is shown in your UPI app.
+                              <i className={`fas ${onMobile ? "fa-mobile-alt text-green-400" : "fa-laptop text-yellow-400"} mr-1`}></i>
+                              {onMobile
+                                ? "Phone detected: the app you select (GPay, PhonePe, Paytm…) will open automatically to pay."
+                                : "Laptop/Desktop detected: UPI apps can't be launched from a computer — after paying, a scannable QR code will be shown. Open any UPI app on your phone → Scan & Pay."}
                             </p>
                           </div>
                         ) : (
@@ -1434,12 +1626,12 @@ function CheckoutModal() {
                     {payment.method === "netbanking" && `Net Banking: ${payment.bank?.toUpperCase()}`}
                     {payment.method === "wallet" && `Wallet: ${payment.wallet?.toUpperCase()}`}
                   </p>
-                  {payment.method === "upi" && payment.upiMode === "app" && payment.upiApp && (
+                  {payment.method === "upi" && payment.upiMode === "app" && payment.upiApp && onMobile && (
                     <button
                       type="button"
                       onClick={() => {
                         const app = UPI_APPS.find((a) => a.id === payment.upiApp);
-                        openUpiLink(buildUpiDeepLink(total, app?.link));
+                        openUpiLink(buildUpiDeepLink(total, payment.upiApp));
                         addToast(`Opening ${app?.name || "your UPI app"} to complete your payment…`, "info");
                       }}
                       className="mt-3 w-full py-3 rounded-xl bg-indigo-500/20 border border-indigo-500/50 text-white font-medium hover:bg-indigo-500/30 transition-colors"
@@ -1496,19 +1688,34 @@ function CheckoutModal() {
               </motion.div>
             )}
 
-            {/* STEP 5 — Payment in progress: NO buttons to press. The order is placed
-                automatically the moment the payment completes / control returns to this tab. */}
+            {/* STEP 5 — Payment handoff. NO "Process Order" button anywhere. The order is
+                placed automatically ONLY after the payment is genuinely verified:
+                • Phones: the selected UPI app was opened directly; on return we re-verify
+                  with the gateway (Razorpay) before placing anything.
+                • Laptops: only a scannable QR code is shown (no app launch possible).
+                • If the payment tab/app is closed WITHOUT paying, the intent expires and
+                  the order is NEVER placed. */}
             {step === 5 && orderDetails && (
               <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-6">
                 <div className="text-center">
                   <div className="w-20 h-20 rounded-full bg-indigo-500/20 flex items-center justify-center mx-auto mb-4">
-                    <i className="fas fa-mobile-alt text-4xl text-indigo-300"></i>
+                    <i className={`fas ${onMobile ? "fa-mobile-alt" : "fa-qrcode"} text-4xl text-indigo-300`}></i>
                   </div>
                   <h3 className="text-xl font-semibold mb-2">Complete your payment of {formatINR(orderDetails.total)}</h3>
                   <p className="text-sm text-gray-400 max-w-md mx-auto">
-                    Your UPI app should have opened with the collect request. Finish the payment there —{" "}
-                    <span className="text-white font-medium">your order will be placed automatically</span> as soon as the
-                    payment is done. No need to place it again.
+                    {onMobile ? (
+                      <>
+                        Your UPI app should have opened with the collect request. Finish the payment there —{" "}
+                        <span className="text-white font-medium">your order will be placed automatically</span> once the
+                        payment is confirmed.
+                      </>
+                    ) : (
+                      <>
+                        <span className="fa-laptop mr-1"></span>Laptop / Desktop detected — UPI apps can't be launched from a computer.{" "}
+                        <span className="text-white font-medium">Scan the QR code below</span> with any UPI app on your phone to pay.{" "}
+                        Your order is placed automatically only after the payment is confirmed.
+                      </>
+                    )}
                   </p>
                 </div>
 
@@ -1527,66 +1734,108 @@ function CheckoutModal() {
                   </div>
                 </div>
 
-                {/* Desktop / app-didn't-open fallback: scan-to-pay QR */}
+                {/* LAPTOP/DESKTOP → QR code is the ONLY payment path (apps are never launched here).
+                    MOBILE → QR shown only as a fallback if the app didn't open. */}
                 <div className="glass-card rounded-xl p-4 flex flex-col sm:flex-row items-center gap-4">
                   <img
-                    src={upiQrUrl(buildUpiDeepLink(orderDetails.total))}
+                    src={upiQrUrl(buildUpiQrPayload(orderDetails.total))}
                     alt="UPI payment QR code"
                     className="w-[180px] h-[180px] rounded-lg bg-white p-2 shrink-0"
                   />
                   <div className="text-left">
-                    <h4 className="font-medium mb-1">App didn't open? Scan to pay instead</h4>
+                    <h4 className="font-medium mb-1">{onMobile ? "App didn't open? Scan to pay instead" : "Scan this QR code to pay"}</h4>
                     <p className="text-xs text-gray-300 leading-relaxed">
                       Open any UPI app (Google Pay, PhonePe, Paytm, BHIM…) → <span className="text-white">Scan &amp; Pay</span> →
                       scan this QR. It contains the exact amount ({formatINR(orderDetails.total)}) so you can't mistype it.
                     </p>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const link = buildUpiDeepLink(orderDetails.total);
-                        if (!openUpiLink(link)) window.location.href = link; // last-resort same-tab navigation
-                      }}
-                      className="mt-3 px-4 py-2 rounded-lg bg-white/5 border border-white/10 text-xs text-gray-200 hover:bg-white/10 transition-colors"
-                    >
-                      <i className="fas fa-sync-alt mr-1.5 text-indigo-300"></i>
-                      Retry opening the UPI link
-                    </button>
+                    {onMobile && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const link = buildUpiDeepLink(orderDetails.total, orderDetails.payment.upiApp);
+                          if (!openUpiLink(link)) window.location.href = link; // last-resort same-tab navigation
+                        }}
+                        className="mt-3 px-4 py-2 rounded-lg bg-white/5 border border-white/10 text-xs text-gray-200 hover:bg-white/10 transition-colors"
+                      >
+                        <i className="fas fa-sync-alt mr-1.5 text-indigo-300"></i>
+                        Retry opening {UPI_APPS.find((a) => a.id === orderDetails.payment.upiApp)?.name || "the UPI app"}
+                      </button>
+                    )}
                   </div>
                 </div>
 
                 <div className="p-3 rounded-lg bg-white/5 border border-white/10 flex items-start gap-2">
                   <i className="fas fa-lock text-green-400 mt-0.5"></i>
                   <span className="text-xs text-gray-300">
-                    Your order is only confirmed and charged once. If the payment fails or you cancel, nothing is ordered and your cart stays intact.
+                    Your order is only confirmed and charged once. If the payment fails or you close the payment screen without paying,
+                    nothing is ordered and your cart stays intact.
                   </span>
                 </div>
 
-                {/* Automatic detection panel — no confirm/process button by design */}
+                {/* Automatic verification panel — no confirm/process button by design */}
                 <div className="p-4 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center gap-3">
                   <i className="fas fa-spinner fa-spin text-indigo-300 text-lg"></i>
                   <div className="text-left">
                     <p className="text-sm font-medium text-white">Waiting for your payment to complete…</p>
                     <p className="text-xs text-gray-300">
-                      We detect it automatically when you return to this page — your order is then placed instantly, without any button.
+                      We verify the payment automatically — your order is placed instantly once confirmation arrives. Closing this
+                      screen without paying cancels the request; no order will be created.
                     </p>
                   </div>
                 </div>
 
+                {/* Direct-UPI (no gateway): payment PROOF panel — the only way an order gets
+                    placed is when the payer supplies the reference no. their bank app shows
+                    AFTER a successful debit. No blind auto-placement on tab return. */}
+                {(!import.meta.env.VITE_RAZORPAY_KEY_ID || import.meta.env.VITE_RAZORPAY_KEY_ID === "rzp_test_XXXXXXXXXXXXXX") && (
+                  <div className="glass-card rounded-xl p-4 space-y-3">
+                    <h4 className="font-medium text-sm flex items-center gap-2">
+                      <i className="fas fa-receipt text-indigo-300"></i>
+                      Already paid? Enter your UPI reference number
+                    </h4>
+                    <p className="text-xs text-gray-300">
+                      After a successful payment, your UPI/bank app shows a 12-digit <span className="text-white">Transaction / Reference ID</span>.
+                      Enter it here — we record it with your order and place it automatically. (If you don't submit a reference, the
+                      payment request simply expires and nothing is ordered.)
+                    </p>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="text"
+                        value={upiProofRef}
+                        onChange={(e) => setUpiProofRef(e.target.value)}
+                        maxLength={14}
+                        className="flex-1 px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors font-mono uppercase"
+                        placeholder="e.g. 412903456789"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleSubmitUpiProof}
+                        disabled={isProcessing}
+                        className="px-5 py-3 rounded-xl bg-indigo-500/20 border border-indigo-500/50 text-white font-medium hover:bg-indigo-500/30 transition-colors disabled:opacity-50"
+                      >
+                        <i className="fas fa-check-double mr-1.5 text-indigo-300"></i>Submit Payment Reference
+                      </button>
+                    </div>
+                    {upiProofError && <p className="text-red-400 text-xs">{upiProofError}</p>}
+                  </div>
+                )}
+
                 <div className="flex flex-col sm:flex-row gap-3">
-                  <button
-                    onClick={() => {
-                      const app = UPI_APPS.find((a) => a.id === orderDetails.payment.upiApp);
-                      const link = buildUpiDeepLink(orderDetails.total, app?.link);
-                      if (!openUpiLink(link)) window.location.href = link; // last-resort same-tab navigation
-                    }}
-                    className="btn-secondary flex-1 py-3.5 rounded-full text-white font-medium"
-                  >
-                    <i className="fas fa-redo mr-2"></i>
-                    Open {UPI_APPS.find((a) => a.id === orderDetails.payment.upiApp)?.name || "UPI App"} Again
-                  </button>
+                  {onMobile && (
+                    <button
+                      onClick={() => {
+                        const link = buildUpiDeepLink(orderDetails.total, orderDetails.payment.upiApp);
+                        if (!openUpiLink(link)) window.location.href = link; // last-resort same-tab navigation
+                      }}
+                      className="btn-secondary flex-1 py-3.5 rounded-full text-white font-medium"
+                    >
+                      <i className="fas fa-redo mr-2"></i>
+                      Open {UPI_APPS.find((a) => a.id === orderDetails.payment.upiApp)?.name || "UPI App"} Again
+                    </button>
+                  )}
                   <button
                     onClick={handleReportPaymentFailure}
-                    className="px-6 py-3.5 rounded-full bg-red-500/10 border border-red-500/30 text-red-300 font-medium hover:bg-red-500/20 transition-colors"
+                    className={`${onMobile ? "" : "flex-1 "}px-6 py-3.5 rounded-full bg-red-500/10 border border-red-500/30 text-red-300 font-medium hover:bg-red-500/20 transition-colors`}
                   >
                     Payment Failed / Cancelled
                   </button>

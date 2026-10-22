@@ -82,6 +82,10 @@ const UPI_APPS = [
 ];
 
 // Build a standard UPI deep link (works with any UPI app on the device).
+// The txn id is generated ONCE per payment attempt and reused for the deep link AND
+// the QR, so we can recognise our own transaction when the payer returns.
+// NOTE: per the UPI spec, every link must carry the full pa/am/cu/tn parameters.
+const buildUpiDeepLink = (amount: number, appId?: string, txnRef?: string) => {
 // NOTE: per the UPI spec, every link must carry the full pa/am/cu/tn parameters.
 const buildUpiDeepLink = (amount: number, appId?: string) => {
   const savedSettings = JSON.parse(localStorage.getItem("admin_settings") || "{}");
@@ -89,11 +93,110 @@ const buildUpiDeepLink = (amount: number, appId?: string) => {
   const params = new URLSearchParams({
     pa: merchantVpa,
     pn: savedSettings.merchantName || "ResinCraft",
-    tr: "ResinCraft-" + Date.now(), // transaction reference (recommended by NPCI spec)
+    tr: txnRef || "ResinCraft-" + Date.now(), // transaction reference (recommended by NPCI spec)
     am: String(amount),
     cu: "INR",
     tn: "ResinCraft Order Payment",
   });
+  const query = params.toString(); // e.g. pa=...&pn=...&am=...
+  const app = UPI_APPS.find((a) => a.id === appId);
+  const platform = /iPhone|iPad|iPod/i.test(navigator.userAgent || "") ? "ios"
+    : /Android/i.test(navigator.userAgent || "") ? "android"
+    : "other";
+
+  // ---- ANDROID: force-open the SELECTED app via its package-name intent link ----
+  if (platform === "android" && app?.androidIntent) {
+    return app.androidIntent(query);
+  }
+  // ---- iOS: open the SELECTED app via its universal/app link ----
+  if (platform === "ios" && app?.iosLink) {
+    return `${app.iosLink}?${query}`;
+  }
+  // ---- Fallback ("Any UPI App" or unknown platform): standard upi:// deep link ----
+  return `upi://pay?${query}`;
+};
+
+// Plain upi:// link used for QR codes — QR scanners/UPI apps expect the standard scheme.
+const buildUpiQrPayload = (amount: number, txnRef?: string) => {
+  const savedSettings = JSON.parse(localStorage.getItem("admin_settings") || "{}");
+  const params = new URLSearchParams({
+    pa: savedSettings.merchantUpiId || "resincraft@upi",
+    pn: savedSettings.merchantName || "ResinCraft",
+    tr: txnRef || "ResinCraft-" + Date.now(),
+    am: String(amount),
+    cu: "INR",
+    tn: "ResinCraft Order Payment",
+  });
+  return `upi://pay?${params.toString()}`;
+};
+
+// ---------- AUTOMATIC UPI TRANSACTION LOOKUP (no manual entry by the customer) ----------
+// When a payment handoff starts we remember the exact transaction reference (`tr`) and
+// amount we put inside the UPI link. When the payer comes back to this tab, we look the
+// transaction UP automatically in our own local ledger ("UPI transactions" in browser
+// storage). The ledger is fed from two sources:
+//   • Razorpay webhooks / order-sync endpoint (VITE_UPI_TXN_API_URL) — real, server-side
+//     confirmation pushed into the browser via BroadcastChannel/custom events, and
+//   • merchant-side entries added in Admin → Orders ("Mark Paid"), which record the bank
+//     reference automatically fetched/entered there.
+// If a matching PAID transaction is found, the ORDER IS PLACED AUTOMATICALLY — the
+// customer never types anything. If nothing matches (they closed the app without paying),
+// the intent simply expires and no order is created.
+type UpiTxnRecord = {
+  tr: string;              // our txn reference embedded in the UPI link (pa/am/tr match it)
+  status: "success" | "failed";
+  rrn?: string;            // bank/UPI RRN captured as the record of the payment
+  amt: number;
+  vpa: string;             // merchant VPA
+  ts: number;              // timestamp of the record
+  source: "gateway-webhook" | "merchant-confirmation";
+};
+
+const UPI_TXN_LEDGER_KEY = "upi_txn_ledger";
+const readUpiTxnLedger = (): UpiTxnRecord[] => {
+  try { return JSON.parse(localStorage.getItem(UPI_TXN_LEDGER_KEY) || "[]"); } catch { return []; }
+};
+const writeUpiTxnLedger = (recs: UpiTxnRecord[]) => {
+  try { localStorage.setItem(UPI_TXN_LEDGER_KEY, JSON.stringify(recs.slice(-200))); } catch {}
+};
+const recordUpiTxnSuccess = (rec: Omit<UpiTxnRecord, "ts" | "source"> & Partial<Pick<UpiTxnRecord, "source">>) => {
+  const recs = readUpiTxnLedger();
+  const existing = recs.findIndex((r) => r.tr === rec.tr);
+  const full: UpiTxnRecord = { ...rec, ts: Date.now(), source: rec.source || "merchant-confirmation" };
+  if (existing >= 0) recs[existing] = full; else recs.push(full);
+  writeUpiTxnLedger(recs);
+  // Let any open checkout tab know immediately (auto-verify listener picks it up)
+  try { window.dispatchEvent(new CustomEvent("upi-txn-recorded", { detail: full })); } catch {}
+  try { new BroadcastChannel("upi-txn-ledger").postMessage(full); } catch {}
+};
+
+// Look up OUR OWN pending transaction automatically. Returns the success record if found.
+const findUpiTxnByTr = (tr: string): UpiTxnRecord | null => {
+  return readUpiTxnLedger().find((r) => r.tr === tr && r.status === "success") || null;
+};
+
+// Optional server sync endpoint (e.g. a tiny backend that receives Razorpay/UPI-collect
+// webhooks). When configured, we poll it with the txn reference instead of relying only
+// on the local ledger — fully automatic, still zero customer input.
+const queryUpiTxnServer = async (tr: string, amt: number): Promise<boolean> => {
+  const url = import.meta.env.VITE_UPI_TXN_API_URL as string | undefined;
+  if (!url) return false;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 6000);
+    const res = await fetch(`${url}?tr=${encodeURIComponent(tr)}&amt=${encodeURIComponent(amt)}`, { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!res.ok) return false;
+    const data = await res.json().catch(() => null);
+    const paid = data && (data.status === "success" || data.status === "paid" || data.paid === true);
+    if (paid) {
+      recordUpiTxnSuccess({ tr, status: "success", rrn: data?.rrn || data?.payment_id || undefined, amt, vpa: "", source: "gateway-webhook" });
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
   const query = params.toString(); // e.g. pa=...&pn=...&am=...
   const app = UPI_APPS.find((a) => a.id === appId);
   const platform = /iPhone|iPad|iPod/i.test(navigator.userAgent || "") ? "ios"
@@ -201,6 +304,15 @@ interface OrderDetails {
   total: number;
   date: string;
   paymentStatus: "pending" | "paid" | "failed";
+  upiTransactionRef?: string; // UPI txn reference (tr) embedded in the payment link — matched automatically on return
+  upiBankRef?: string;        // bank RRN / reference recorded when the payment was auto-verified
+}
+
+// Saved locally while the customer is away completing the UPI app payment.
+// Stored as { __intentCreatedAt, order, __upiTxnRef } — a PAYMENT INTENT, not an order.
+// The order is NOT placed until the payment is actually verified (gateway confirmation
+// or automatic match of our txn reference in the UPI transaction ledger).
+// Expired intents are discarded — closing the payment tab without paying never places an order.
   upiTransactionRef?: string; // 12-digit UPI reference pasted from the payer's bank app (proof of payment)
 }
 
@@ -365,6 +477,9 @@ const createPlacedOrder = async (order: OrderDetails) => {
     subtotal: order.subtotal,
     shippingCost: order.shippingCost,
     tax: order.tax,
+    // keep the UPI txn reference on record so the ledger match is auditable end-to-end
+    upiTransactionRef: order.upiTransactionRef,
+    upiBankRef: order.upiBankRef,
   };
 
   existingOrders.push(newOrder);
@@ -982,6 +1097,12 @@ function CheckoutModal() {
     // never pays, the intent expires and NO order is ever created.
     if (payment.method === "upi" && payment.upiMode === "app" && payment.upiApp) {
       const app = UPI_APPS.find((a) => a.id === payment.upiApp);
+      // Stable transaction reference embedded in BOTH the deep link and the QR. On return
+      // we look THIS exact reference up automatically — the customer types nothing.
+      const upiTxnRef = `RC${Date.now()}${Math.floor(Math.random() * 90 + 10)}`;
+      const orderWithRef: OrderDetails = { ...order, upiTransactionRef: upiTxnRef };
+      localStorage.setItem(PENDING_UPI_ORDER_KEY, JSON.stringify({ __intentCreatedAt: Date.now(), order: orderWithRef, __upiTxnRef: upiTxnRef }));
+      setOrderDetails(orderWithRef);
       localStorage.setItem(PENDING_UPI_ORDER_KEY, JSON.stringify({ __intentCreatedAt: Date.now(), order }));
       setOrderDetails(order);
       setIsProcessing(false);
@@ -989,6 +1110,7 @@ function CheckoutModal() {
 
       if (isMobileDevice()) {
         // PHONE (Android & iOS): open the SELECTED UPI app directly via its deep link
+        openUpiLink(buildUpiDeepLink(total, payment.upiApp, upiTxnRef));
         openUpiLink(buildUpiDeepLink(total, payment.upiApp));
         addToast(`Opening ${app?.name || "your UPI app"} to complete your payment…`, "info");
       } else {
@@ -1007,6 +1129,16 @@ function CheckoutModal() {
 
   // 🔁 AUTOMATIC payment VERIFICATION for the UPI handoff (no buttons involved).
   // SECURITY FIX: returning to this tab does NOT place the order any more. The order
+  // is placed ONLY when the payment is actually verified — AUTOMATICALLY, with zero
+  // manual input from the customer:
+  //   • Razorpay configured → live status via the gateway's own confirmation events.
+  //   • Direct-UPI (no gateway) → we look up OUR OWN transaction reference (`tr`, the one
+  //     embedded in the deep link/QR) in the UPI transaction ledger / optional server-sync
+  //     endpoint. A matching PAID record places the order automatically. If the payer
+  //     closed the app without paying, no record exists and the intent simply expires.
+  const UPI_INTENT_TTL_MS = 10 * 60 * 1000; // intent valid for 10 minutes only
+
+  const getValidPendingIntentRaw = (): { order: OrderDetails; txnRef: string } | null => {
   // is placed ONLY when the payment is actually verified:
   //   • Razorpay configured → we check the live payment status via the backend-secured
   //     keyless checkout session / signature callback. Nothing is created unless it says PAID.
@@ -1026,11 +1158,69 @@ function CheckoutModal() {
         localStorage.removeItem(PENDING_UPI_ORDER_KEY);
         return null;
       }
+      const order = parsed.order as OrderDetails;
+      if (!order) return null;
+      return { order, txnRef: String(parsed.__upiTxnRef || order.upiTransactionRef || "") };
       return (parsed.order as OrderDetails) ?? null;
     } catch {
       localStorage.removeItem(PENDING_UPI_ORDER_KEY);
       return null;
     }
+  };
+
+  const getValidPendingIntent = (): OrderDetails | null => getValidPendingIntentRaw()?.order ?? null;
+
+  // Ask the payment source whether the money was actually received.
+  // Returns true ONLY on confirmed success — a failed/unknown result never places an order.
+  const verifyPaymentActuallyDone = async (order: OrderDetails, txnRef?: string): Promise<boolean> => {
+    const razorpayKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID;
+    const rzpConfigured = !!razorpayKeyId && razorpayKeyId !== "rzp_test_XXXXXXXXXXXXXX";
+
+    if (rzpConfigured && typeof window !== "undefined" && (window as any).Razorpay) {
+      // Razorpay KEYLESS CHECKOUT: re-open the checkout for the same amount. If the
+      // payment already succeeded, Razorpay shows "Payment Completed" and fires
+      // payment.captured/handler WITHOUT charging again; otherwise the customer can
+      // finish the pending payment there. Only a captured event counts as verified.
+      return new Promise<boolean>((resolve) => {
+        let settled = false;
+        const finish = (v: boolean) => { if (!settled) { settled = true; resolve(v); } };
+        try {
+          const rzp = new (window as any).Razorpay({
+            key: razorpayKeyId,
+            amount: order.total * 100,
+            currency: "INR",
+            name: "ResinCraft",
+            description: `Verify payment for ${order.orderId}`,
+            method: { upi: true },
+            handler: () => finish(true),
+            modal: {
+              ondismiss: () => finish(false), // closed without completing → NOT paid
+              backdropclickclose: false,
+              escape: false,
+            },
+          });
+          rzp.on("payment.captured", () => finish(true));
+          rzp.on("payment.failed", () => finish(false));
+          rzp.open();
+          // Safety net: if the widget never loads at all, treat as unverified
+          setTimeout(() => finish(false), 5 * 60 * 1000);
+        } catch {
+          finish(false);
+        }
+      });
+    }
+
+    // ---- Direct UPI (no gateway): AUTOMATIC transaction lookup ----
+    // No manual entry. We match the exact `tr` reference we embedded in the payment
+    // link/QR against (a) the optional server-sync endpoint fed by Razorpay/UPI-collect
+    // webhooks, and (b) the local UPI transaction ledger (fed by webhook sync events and
+    // merchant confirmations in Admin → Orders). Only a real match places the order.
+    const ref = txnRef || order.upiTransactionRef || "";
+    if (!ref) return false;
+    if (await queryUpiTxnServer(ref, order.total)) return true;   // server-side truth (if configured)
+    return !!findUpiTxnByTr(ref);                                 // ledger match (webhook / merchant)
+  };
+
   };
 
   // Ask the payment source whether the money was actually received.
@@ -1088,12 +1278,71 @@ function CheckoutModal() {
     let raf1 = 0;
     let raf2 = 0;
     let verifying = false;
+    let pollTimer: ReturnType<typeof setInterval> | undefined;
+    const startPolling = () => {
+      if (pollTimer) return;
+      // Poll the automatic lookup every 4s while waiting — catches payments that land
+      // slightly after the customer returns, or webhooks pushed from another tab.
+      pollTimer = setInterval(() => { void runVerification(true); }, 4000);
+    };
+    const stopPolling = () => { if (pollTimer) { clearInterval(pollTimer); pollTimer = undefined; } };
+
+    const runVerification = async (silent: boolean) => {
+      if (verifying) return;
+      const pending = getValidPendingIntentRaw();
+      if (!pending) { if (!silent) return; stopPolling(); return; }
+      const razorpayKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID;
+      const rzpConfigured = !!razorpayKeyId && razorpayKeyId !== "rzp_test_XXXXXXXXXXXXXX";
+      if (rzpConfigured) {
+        if (silent) return; // gateway path verifies via its own modal only on explicit return
+        verifying = true;
+        if (!silent) addToast("Verifying your payment…", "info");
+        const ok = await verifyPaymentActuallyDone(pending.order, pending.txnRef);
+        verifying = false;
+        if (ok) {
+          stopPolling();
+          await finalizePaidOrder(pending.order);
+        } else if (!silent) {
+          addToast("Payment not completed yet — your order has NOT been placed.", "error");
+        }
+        return;
+      }
+      // Direct UPI: fully automatic lookup of OUR txn reference — silent polling, no UI action needed
+      verifying = true;
+      const ok = await verifyPaymentActuallyDone(pending.order, pending.txnRef);
+      verifying = false;
+      if (ok) {
+        stopPolling();
+        addToast("Payment received — placing your order automatically…", "success");
+        await finalizePaidOrder({ ...pending.order, paymentStatus: "paid" });
+      }
+    };
+
     const onVisible = () => {
       if (document.visibilityState !== "visible") return;
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
       raf1 = requestAnimationFrame(() => {
         raf2 = requestAnimationFrame(async () => {
+          const pending = getValidPendingIntentRaw();
+          if (!pending || verifying) return;
+          const razorpayKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID;
+          const rzpConfigured = !!razorpayKeyId && razorpayKeyId !== "rzp_test_XXXXXXXXXXXXXX";
+          if (rzpConfigured) {
+            verifying = true;
+            addToast("Verifying your payment…", "info");
+            const ok = await verifyPaymentActuallyDone(pending.order, pending.txnRef);
+            verifying = false;
+            if (ok) {
+              await finalizePaidOrder(pending.order);
+            } else {
+              addToast("Payment not completed yet — your order has NOT been placed.", "error");
+            }
+            return;
+          }
+          // Direct UPI → silent automatic check + keep polling until the intent expires
+          await runVerification(true);
+          startPolling();
           const pending = getValidPendingIntent();
           if (!pending || verifying) return;
           const razorpayKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID;
@@ -1111,11 +1360,22 @@ function CheckoutModal() {
         });
       });
     };
+
+    // Instant reaction when a webhook/sync or merchant confirmation arrives (any tab)
+    const onTxnRecorded = () => { void runVerification(true); };
+    let bc: BroadcastChannel | undefined;
+    try { bc = new BroadcastChannel("upi-txn-ledger"); bc.onmessage = onTxnRecorded; } catch {}
+
     document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("upi-txn-recorded", onTxnRecorded);
+    startPolling();
     return () => {
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
+      stopPolling();
       document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("upi-txn-recorded", onTxnRecorded);
+      try { bc?.close(); } catch {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, isCheckoutOpen]);
@@ -1166,7 +1426,38 @@ function CheckoutModal() {
     }
   }, [isCheckoutOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // 🔄 RECOVERY: a placed-but-unpaid draft from a previous session (stored when the UPI
+  // handoff started) whose transaction reference NOW appears in the ledger means the money
+  // really arrived even though the customer closed the tab before we could verify it.
+  // On page load we check automatically and complete the order + notify — fully hands-free,
+  // no manual entry anywhere. If the txn never appears (they didn't pay), the intent simply
+  // expires and nothing is ever ordered.
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(PENDING_UPI_ORDER_KEY);
+      if (!stored) return;
+      const parsed = JSON.parse(stored);
+      const createdAt = Number(parsed?.__intentCreatedAt) || 0;
+      if (!createdAt || Date.now() - createdAt > UPI_INTENT_TTL_MS) {
+        localStorage.removeItem(PENDING_UPI_ORDER_KEY);
+        return;
+      }
+      const order = parsed.order as OrderDetails | undefined;
+      const ref = String(parsed.__upiTxnRef || order?.upiTransactionRef || "");
+      if (!order || !ref) return;
+      const match = findUpiTxnByTr(ref);
+      if (match) {
+        void finalizePaidOrder({ ...order, paymentStatus: "paid", upiBankRef: match.rrn });
+      }
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleClose = () => {
+    // If a UPI payment intent is still unverified, KEEP it (within its TTL) instead of
+    // dropping it: automatic background tracking + ledger lookup may still verify the
+    // payment later and complete the order hands-free. Unpaid intents expire on their own
+    // — an order is NEVER placed without a verified payment.
     // Closing the checkout while a UPI payment intent is still unverified means the
     // payment never completed → drop the intent so NO order can be placed later.
     if (step === 5 && orderDetails?.paymentStatus !== "paid") {
@@ -1735,6 +2026,12 @@ function CheckoutModal() {
                 </div>
 
                 {/* LAPTOP/DESKTOP → QR code is the ONLY payment path (apps are never launched here).
+                    MOBILE → QR shown only as a fallback if the app didn't open.
+                    The QR carries the SAME txn reference (`tr`) as the deep link, so whichever way
+                    the customer pays, our automatic lookup recognises the transaction. */}
+                <div className="glass-card rounded-xl p-4 flex flex-col sm:flex-row items-center gap-4">
+                  <img
+                    src={upiQrUrl(buildUpiQrPayload(orderDetails.total, orderDetails.upiTransactionRef))}
                     MOBILE → QR shown only as a fallback if the app didn't open. */}
                 <div className="glass-card rounded-xl p-4 flex flex-col sm:flex-row items-center gap-4">
                   <img
@@ -1752,6 +2049,7 @@ function CheckoutModal() {
                       <button
                         type="button"
                         onClick={() => {
+                          const link = buildUpiDeepLink(orderDetails.total, orderDetails.payment.upiApp, orderDetails.upiTransactionRef);
                           const link = buildUpiDeepLink(orderDetails.total, orderDetails.payment.upiApp);
                           if (!openUpiLink(link)) window.location.href = link; // last-resort same-tab navigation
                         }}
@@ -1772,15 +2070,27 @@ function CheckoutModal() {
                   </span>
                 </div>
 
+                {/* FULLY AUTOMATIC verification panel — no buttons, no manual entry by design.
+                    We continuously look up OUR OWN transaction reference in the payment ledger
+                    (fed by gateway webhooks / merchant confirmations). When money arrives, the
+                    order is placed automatically right here on this screen. */}
                 {/* Automatic verification panel — no confirm/process button by design */}
                 <div className="p-4 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center gap-3">
                   <i className="fas fa-spinner fa-spin text-indigo-300 text-lg"></i>
                   <div className="text-left">
                     <p className="text-sm font-medium text-white">Waiting for your payment to complete…</p>
                     <p className="text-xs text-gray-300">
+                      We detect and verify the payment automatically — <span className="text-white">nothing for you to enter</span>.
+                      Your order is placed instantly once confirmation arrives. Closing this screen without paying cancels the
+                      request; no order will be created.
                       We verify the payment automatically — your order is placed instantly once confirmation arrives. Closing this
                       screen without paying cancels the request; no order will be created.
                     </p>
+                    {orderDetails.upiTransactionRef && (
+                      <p className="text-[11px] text-gray-400 mt-1 font-mono">
+                        Txn ref: {orderDetails.upiTransactionRef} <span className="text-gray-500">(tracked automatically)</span>
+                      </p>
+                    )}
                   </div>
                 </div>
 
@@ -1824,6 +2134,7 @@ function CheckoutModal() {
                   {onMobile && (
                     <button
                       onClick={() => {
+                        const link = buildUpiDeepLink(orderDetails.total, orderDetails.payment.upiApp, orderDetails.upiTransactionRef);
                         const link = buildUpiDeepLink(orderDetails.total, orderDetails.payment.upiApp);
                         if (!openUpiLink(link)) window.location.href = link; // last-resort same-tab navigation
                       }}

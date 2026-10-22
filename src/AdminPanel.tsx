@@ -1,5 +1,18 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import emailjs from "@emailjs/browser";
+import {
+  NotifyOrder,
+  notifySubject,
+  buildShipmentEmailHTML,
+  buildShipmentEmailText,
+  buildDeliveredEmailHTML,
+  buildDeliveredEmailText,
+  buildCancelledEmailHTML,
+  buildCancelledEmailText,
+  whatsappTemplates,
+  buildWhatsappLink,
+} from "./notifications";
 
 // ==================== TYPES ====================
 interface AdminProduct {
@@ -27,6 +40,19 @@ interface AdminOrder {
   paymentStatus?: "pending" | "paid" | "failed";
   date: string;
   address: string;
+  city?: string;
+  state?: string;
+  pincode?: string;
+  subtotal?: number;
+  shippingCost?: number;
+  tax?: number;
+  // Shipment & invoice (invoice is generated ONLY once the order is shipped)
+  awb?: string;
+  courier?: string;
+  expectedDelivery?: string;
+  shippedAt?: string;
+  invoiceNumber?: string;
+  invoiceGeneratedAt?: string;
 }
 
 interface AdminSettings {
@@ -50,6 +76,10 @@ interface AdminSettings {
   emailjsTemplateId: string;
   emailjsPublicKey: string;
   autoEmailCustomer: boolean;
+  // Ship-out automation: when an order is marked SHIPPED, automatically generate &
+  // email the tax invoice and send the WhatsApp shipping notification.
+  autoInvoiceOnShipping: boolean;
+  autoWhatsappOnShipping: boolean;
 }
 
 // ==================== HELPERS ====================
@@ -143,6 +173,8 @@ const defaultSettings: AdminSettings = {
   emailjsTemplateId: "",
   emailjsPublicKey: "",
   autoEmailCustomer: true,
+  autoInvoiceOnShipping: true,
+  autoWhatsappOnShipping: true,
 };
 
 // ==================== ADMIN PANEL ====================
@@ -254,6 +286,7 @@ export default function AdminPanel({ onClose }: { onClose: () => void }) {
             setSelectedOrder={setSelectedOrder}
             filter={orderFilter}
             setFilter={setOrderFilter}
+            settings={settings}
           />
         )}
 
@@ -726,6 +759,7 @@ function OrdersView({
   setSelectedOrder,
   filter,
   setFilter,
+  settings,
 }: {
   orders: AdminOrder[];
   setOrders: React.Dispatch<React.SetStateAction<AdminOrder[]>>;
@@ -733,14 +767,185 @@ function OrdersView({
   setSelectedOrder: (o: AdminOrder | null) => void;
   filter: string;
   setFilter: (f: string) => void;
+  settings: AdminSettings;
 }) {
   const filteredOrders = filter === "all" ? orders : orders.filter((o) => o.status === filter);
+  const [shipForm, setShipForm] = useState({ courier: "", awb: "", expectedDelivery: "" });
+  const [busy, setBusy] = useState(false);
 
-  const updateOrderStatus = (orderId: string, newStatus: AdminOrder["status"]) => {
-    setOrders((prev) => prev.map((o) => (o.orderId === orderId ? { ...o, status: newStatus } : o)));
-    if (selectedOrder && selectedOrder.orderId === orderId) {
-      setSelectedOrder({ ...selectedOrder, status: newStatus });
+  useEffect(() => {
+    if (selectedOrder) {
+      setShipForm({
+        courier: selectedOrder.courier || "",
+        awb: selectedOrder.awb || "",
+        expectedDelivery: selectedOrder.expectedDelivery || "",
+      });
     }
+  }, [selectedOrder?.orderId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- helpers -----------------------------------------------------------
+
+  const toNotifyOrder = (order: AdminOrder, extra?: Partial<NotifyOrder>): NotifyOrder => ({
+    orderId: order.orderId,
+    date: order.date,
+    items: order.items,
+    customer: {
+      fullName: order.customerName,
+      email: order.email,
+      phone: order.phone,
+      address: order.address,
+      city: order.city,
+      state: order.state,
+      pincode: order.pincode,
+      country: "India",
+    },
+    paymentMethod: order.paymentMethod,
+    total: order.total,
+    subtotal: order.subtotal ?? order.items.reduce((s, i) => s + i.price * i.quantity, 0),
+    shippingCost: order.shippingCost ?? 0,
+    tax: order.tax ?? 0,
+    ...extra,
+  });
+
+  const merchant = () => ({
+    email: settings.merchantEmail || "support@resincraft.in",
+    phone: settings.merchantPhone || "",
+  });
+
+  const sendCustomerStatusEmail = async (order: AdminOrder, status: AdminOrder["status"]) => {
+    if (!settings.autoEmailCustomer) return;
+    const { emailjsServiceId, emailjsTemplateId, emailjsPublicKey } = settings;
+    if (!emailjsServiceId || !emailjsTemplateId || !emailjsPublicKey) {
+      console.warn("EmailJS not configured — status email skipped.");
+      return;
+    }
+
+    // 📄 The invoice is generated ONLY when the order is marked as SHIPPED.
+    const notify = toNotifyOrder(order);
+    let html = "";
+    let text = "";
+    let subject = "";
+    if (status === "shipped") {
+      subject = notifySubject.shipped(order.orderId);
+      html = buildShipmentEmailHTML(notify, merchant()); // includes the tax invoice
+      text = buildShipmentEmailText(notify, merchant());
+    } else if (status === "delivered") {
+      subject = notifySubject.delivered(order.orderId);
+      html = buildDeliveredEmailHTML(notify, merchant());
+      text = buildDeliveredEmailText(notify, merchant());
+    } else if (status === "cancelled") {
+      subject = notifySubject.cancelled(order.orderId);
+      html = buildCancelledEmailHTML(notify, merchant());
+      text = buildCancelledEmailText(notify, merchant());
+    } else {
+      return;
+    }
+
+    try {
+      await emailjs.send(
+        emailjsServiceId,
+        emailjsTemplateId,
+        {
+          to_email: order.email,
+          to_name: order.customerName,
+          from_name: "ResinCraft",
+          reply_to: merchant().email,
+          subject,
+          message: text,
+          html_message: html,
+          order_id: order.orderId,
+          order_total: formatINR(order.total),
+          order_date: order.date,
+        },
+        emailjsPublicKey
+      );
+      console.log(`✅ Professional ${status} email sent to ${order.email}`);
+    } catch (error) {
+      console.error("❌ Failed to send status email:", error);
+    }
+  };
+
+  // Opens WhatsApp with a professionally formatted shipping message for the customer.
+  // (wa.me links cannot carry raw HTML — this is WhatsApp's own rich-text format.)
+  const openCustomerWhatsApp = (order: AdminOrder) => {
+    const notify = toNotifyOrder(order);
+    const url = buildWhatsappLink(order.phone, whatsappTemplates.shipped(notify));
+    window.open(url, "_blank");
+  };
+
+  const openMerchantWhatsApp = (order: AdminOrder) => {
+    const notify = toNotifyOrder(order);
+    const url = buildWhatsappLink(settings.whatsappNumber, whatsappTemplates.shipped(notify));
+    window.open(url, "_blank");
+  };
+
+  const generateInvoiceFile = (order: AdminOrder) => {
+    // Invoice generation is only allowed AFTER the item is shipped.
+    if (order.status !== "shipped" && order.status !== "delivered") {
+      alert("The invoice can be generated only after the order is marked as Shipped.");
+      return;
+    }
+    const notify = toNotifyOrder(order);
+    const html = buildShipmentEmailHTML(notify, merchant()); // full professional invoice layout
+    const w = window.open("", "_blank");
+    if (!w) return;
+    w.document.write(html);
+    w.document.close();
+    setTimeout(() => { try { w.focus(); w.print(); } catch { /* user can print manually */ } }, 500);
+  };
+
+  // ---- status transitions ------------------------------------------------
+
+  const markShipped = async () => {
+    if (!selectedOrder) return;
+    setBusy(true);
+    const now = new Date();
+    const eta = new Date(now.getTime() + 5 * 24 * 60 * 60 * 1000).toLocaleDateString("en-IN", {
+      year: "numeric", month: "short", day: "numeric",
+    });
+    const invoiceNumber = `INV-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}-${selectedOrder.orderId.replace(/^RC/, "").slice(-6)}`;
+    const shipped: AdminOrder = {
+      ...selectedOrder,
+      status: "shipped",
+      courier: shipForm.courier.trim() || selectedOrder.courier || "India Post / Delhivery",
+      awb: shipForm.awb.trim() || selectedOrder.awb || String(Date.now()).slice(-11),
+      expectedDelivery: shipForm.expectedDelivery.trim() || selectedOrder.expectedDelivery || eta,
+      shippedAt: now.toLocaleString("en-IN"),
+      // 🧾 Tax invoice is generated at this exact moment — never before shipping.
+      invoiceNumber,
+      invoiceGeneratedAt: now.toLocaleString("en-IN"),
+    };
+
+    setOrders((prev) => prev.map((o) => (o.orderId === shipped.orderId ? shipped : o)));
+    setSelectedOrder(shipped);
+
+    // Automatic, professional notifications on ship-out
+    if (settings.autoInvoiceOnShipping !== false) {
+      await sendCustomerStatusEmail(shipped, "shipped"); // HTML email WITH the invoice
+    }
+    if (settings.autoWhatsappOnShipping !== false) {
+      openCustomerWhatsApp(shipped); // opens WhatsApp with the formatted shipping message
+    }
+    setBusy(false);
+  };
+
+  const updateOrderStatus = async (orderId: string, newStatus: AdminOrder["status"]) => {
+    const current = orders.find((o) => o.orderId === orderId) || selectedOrder;
+    if (!current) return;
+
+    // Marking as SHIPPED must go through the shipment form (tracking details + invoice).
+    // Just re-open/focus the order so the admin uses the dedicated "Mark Shipped" action.
+    if (newStatus === "shipped" && current.status !== "shipped") {
+      setSelectedOrder(current);
+      return;
+    }
+
+    const updated: AdminOrder = { ...current, status: newStatus };
+    setOrders((prev) => prev.map((o) => (o.orderId === orderId ? updated : o)));
+    if (selectedOrder && selectedOrder.orderId === orderId) setSelectedOrder(updated);
+
+    // Professional HTML email for delivered / cancelled transitions
+    await sendCustomerStatusEmail(updated, newStatus);
   };
 
   return (
@@ -816,6 +1021,13 @@ function OrdersView({
             order={selectedOrder}
             onClose={() => setSelectedOrder(null)}
             onUpdateStatus={(status) => updateOrderStatus(selectedOrder.orderId, status)}
+            shipForm={shipForm}
+            setShipForm={setShipForm}
+            onMarkShipped={markShipped}
+            busy={busy}
+            onSendShippingWhatsApp={() => openCustomerWhatsApp(selectedOrder)}
+            onNotifyMerchantWhatsApp={() => openMerchantWhatsApp(selectedOrder)}
+            onGenerateInvoice={() => generateInvoiceFile(selectedOrder)}
           />
         )}
       </AnimatePresence>
@@ -827,11 +1039,26 @@ function OrderDetailModal({
   order,
   onClose,
   onUpdateStatus,
+  shipForm,
+  setShipForm,
+  onMarkShipped,
+  busy,
+  onSendShippingWhatsApp,
+  onNotifyMerchantWhatsApp,
+  onGenerateInvoice,
 }: {
   order: AdminOrder;
   onClose: () => void;
   onUpdateStatus: (status: AdminOrder["status"]) => void;
+  shipForm: { courier: string; awb: string; expectedDelivery: string };
+  setShipForm: React.Dispatch<React.SetStateAction<{ courier: string; awb: string; expectedDelivery: string }>>;
+  onMarkShipped: () => void;
+  busy: boolean;
+  onSendShippingWhatsApp: () => void;
+  onNotifyMerchantWhatsApp: () => void;
+  onGenerateInvoice: () => void;
 }) {
+  const isShipped = order.status === "shipped" || order.status === "delivered";
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -872,6 +1099,81 @@ function OrderDetailModal({
               <option value="delivered" className="bg-[#0f0f23]">Delivered</option>
               <option value="cancelled" className="bg-[#0f0f23]">Cancelled</option>
             </select>
+            <p className="text-xs text-gray-400 mt-2">
+              <i className="fas fa-info-circle mr-1"></i>
+              Selecting <strong>Shipped</strong> uses the shipment form below — the tax invoice is generated and emailed only at that moment.
+            </p>
+          </div>
+
+          {/* Shipment Details & Invoice */}
+          <div className="glass-card rounded-xl p-4">
+            <h3 className="font-semibold mb-3 flex items-center gap-2">
+              <i className="fas fa-truck-fast text-indigo-400"></i>
+              Shipment &amp; Invoice
+              {isShipped ? (
+                <span className="ml-auto text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                  Invoice {order.invoiceNumber || "Generated"}
+                </span>
+              ) : (
+                <span className="ml-auto text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-yellow-500/15 text-yellow-300 border border-yellow-500/30">
+                  Invoice pending — ships first
+                </span>
+              )}
+            </h3>
+
+            {isShipped ? (
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div><p className="text-gray-300">Courier</p><p className="font-medium">{order.courier || "—"}</p></div>
+                <div><p className="text-gray-300">AWB / Tracking</p><p className="font-medium font-mono">{order.awb || "—"}</p></div>
+                <div><p className="text-gray-300">Shipped On</p><p className="font-medium">{order.shippedAt || "—"}</p></div>
+                <div><p className="text-gray-300">Expected Delivery</p><p className="font-medium">{order.expectedDelivery || "—"}</p></div>
+                <div className="col-span-2 pt-2 flex gap-3">
+                  <button onClick={onGenerateInvoice} className="flex-1 py-2.5 rounded-full bg-purple-500/20 text-purple-300 font-medium hover:bg-purple-500/30 transition-colors text-sm">
+                    <i className="fas fa-file-invoice-dollar mr-2"></i>View / Print Invoice
+                  </button>
+                  <button onClick={onSendShippingWhatsApp} className="flex-1 py-2.5 rounded-full bg-green-500/20 text-green-300 font-medium hover:bg-green-500/30 transition-colors text-sm">
+                    <i className="fab fa-whatsapp mr-2"></i>Resend Shipping WhatsApp
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <input
+                    type="text"
+                    placeholder="Courier (e.g. Delhivery)"
+                    value={shipForm.courier}
+                    onChange={(e) => setShipForm({ ...shipForm, courier: e.target.value })}
+                    className="px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 text-sm"
+                  />
+                  <input
+                    type="text"
+                    placeholder="AWB / Tracking No."
+                    value={shipForm.awb}
+                    onChange={(e) => setShipForm({ ...shipForm, awb: e.target.value })}
+                    className="px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 text-sm"
+                  />
+                </div>
+                <input
+                  type="text"
+                  placeholder="Expected delivery date (optional)"
+                  value={shipForm.expectedDelivery}
+                  onChange={(e) => setShipForm({ ...shipForm, expectedDelivery: e.target.value })}
+                  className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 text-sm"
+                />
+                <button
+                  onClick={onMarkShipped}
+                  disabled={busy}
+                  className="w-full py-3 rounded-full btn-primary text-white font-medium disabled:opacity-50"
+                >
+                  <i className="fas fa-shipping-fast mr-2"></i>
+                  {busy ? "Sending notifications…" : "Mark Shipped — Generate Invoice & Notify Customer"}
+                </button>
+                <p className="text-xs text-gray-400">
+                  This automatically emails the customer a professional HTML shipping notification with the tax invoice, and opens the formatted WhatsApp message.
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Customer */}
@@ -943,25 +1245,31 @@ function OrderDetailModal({
             </div>
           </div>
 
-          {/* Actions */}
+          {/* Actions — professionally formatted notifications */}
           <div className="flex gap-3">
-            <a
-              href={`https://wa.me/${order.phone.replace(/\D/g, "")}?text=Hi ${order.customerName}, your order ${order.orderId} has been ${order.status}. Thank you for shopping with ResinCraft!`}
-              target="_blank"
-              rel="noreferrer"
-              className="flex-1 py-3 rounded-full bg-green-500/20 text-green-300 font-medium text-center hover:bg-green-500/30 transition-colors"
+            <button
+              onClick={onSendShippingWhatsApp}
+              disabled={!isShipped}
+              title={isShipped ? "Open WhatsApp with the formatted shipping message" : "Available after the order is shipped"}
+              className="flex-1 py-3 rounded-full bg-green-500/20 text-green-300 font-medium text-center hover:bg-green-500/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <i className="fab fa-whatsapp mr-2"></i>
-              Send WhatsApp
-            </a>
-            <a
-              href={`mailto:${order.email}?subject=Order ${order.orderId} Update&body=Hi ${order.customerName},`}
+              WhatsApp to Customer
+            </button>
+            <button
+              onClick={onNotifyMerchantWhatsApp}
               className="flex-1 py-3 rounded-full bg-indigo-500/20 text-indigo-300 font-medium text-center hover:bg-indigo-500/30 transition-colors"
             >
-              <i className="fas fa-envelope mr-2"></i>
-              Send Email
-            </a>
+              <i className="fas fa-bell mr-2"></i>
+              Notify Me (WhatsApp)
+            </button>
           </div>
+          {!isShipped && (
+            <p className="text-xs text-gray-400 text-center">
+              <i className="fas fa-lock mr-1"></i>
+              Invoice &amp; shipping notifications unlock once the order is marked as Shipped.
+            </p>
+          )}
         </div>
       </motion.div>
     </motion.div>
@@ -1391,7 +1699,34 @@ function SettingsView({
               />
               <div>
                 <p className="font-medium">Enable Auto Email to Customers</p>
-                <p className="text-xs text-gray-300">Send invoice & order confirmation email automatically</p>
+                <p className="text-xs text-gray-300">Send order confirmation (on payment) &amp; shipping + invoice emails (on ship-out) automatically</p>
+              </div>
+            </label>
+          </div>
+
+          <div className="border-t border-white/10 pt-4 space-y-3">
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settings.autoInvoiceOnShipping !== false}
+                onChange={(e) => setSettings({ ...settings, autoInvoiceOnShipping: e.target.checked })}
+                className="w-5 h-5 accent-indigo-500"
+              />
+              <div>
+                <p className="font-medium">Auto-generate &amp; email invoice when order is marked SHIPPED</p>
+                <p className="text-xs text-gray-300">The tax invoice is created ONLY after shipment — never at checkout</p>
+              </div>
+            </label>
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settings.autoWhatsappOnShipping !== false}
+                onChange={(e) => setSettings({ ...settings, autoWhatsappOnShipping: e.target.checked })}
+                className="w-5 h-5 accent-green-500"
+              />
+              <div>
+                <p className="font-medium">Auto-send WhatsApp shipping notification on ship-out</p>
+                <p className="text-xs text-gray-300">Opens a professionally formatted WhatsApp message to the customer with tracking details</p>
               </div>
             </label>
           </div>
@@ -1405,7 +1740,7 @@ function SettingsView({
               <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
                 <p className="text-xs text-yellow-300 mb-2">
                   <i className="fas fa-lightbulb mr-1"></i>
-                  <strong>Setup Required:</strong> Create a free EmailJS account and get your credentials. See EMAIL_SETUP.md for step-by-step guide.
+                  <strong>Setup Required:</strong> Create a free EmailJS account and get your credentials. In your EmailJS template, add variables named <code className="text-yellow-200">subject</code>, <code className="text-yellow-200">message</code> and <code className="text-yellow-200">html_message</code> (e.g. {"{{subject}"} , {"{{message}"} , {"{{html_message}"} ) so the professionally formatted HTML emails render correctly. See EMAIL_SETUP.md for a step-by-step guide.
                 </p>
               </div>
 

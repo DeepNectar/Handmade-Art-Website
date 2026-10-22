@@ -2,7 +2,13 @@ import { useEffect, useRef, useState, useCallback, createContext, useContext } f
 import { motion, useScroll, useTransform, useInView, AnimatePresence } from "framer-motion";
 import emailjs from "@emailjs/browser";
 import AdminPanel from "./AdminPanel";
-import { generateOrderEmailHTML, generateOrderEmailText } from "./emailTemplate";
+import {
+  buildOrderPlacedEmailHTML,
+  buildOrderPlacedEmailText,
+  whatsappTemplates,
+  buildWhatsappLink,
+  NotifyOrder,
+} from "./notifications";
 
 // ==================== IMAGES ====================
 const IMAGES = {
@@ -281,6 +287,12 @@ const createPlacedOrder = async (order: OrderDetails) => {
     paymentStatus: "paid",
     date: order.date,
     address: `${order.shipping.address}, ${order.shipping.city}, ${order.shipping.state} - ${order.shipping.pincode}`,
+    city: order.shipping.city,
+    state: order.shipping.state,
+    pincode: order.shipping.pincode,
+    subtotal: order.subtotal,
+    shippingCost: order.shippingCost,
+    tax: order.tax,
   };
 
   existingOrders.push(newOrder);
@@ -600,7 +612,20 @@ function CheckoutModal() {
     }
   };
 
-  // 📱 MERCHANT NOTIFICATION SYSTEM
+  // Convert checkout OrderDetails into the shared notification shape
+  const toNotifyOrder = (order: OrderDetails): NotifyOrder => ({
+    orderId: order.orderId,
+    date: order.date,
+    items: order.items.map((i) => ({ name: i.name, price: i.price, quantity: i.quantity })),
+    customer: { ...order.shipping },
+    paymentMethod: order.payment.method,
+    total: order.total,
+    subtotal: order.subtotal,
+    shippingCost: order.shippingCost,
+    tax: order.tax,
+  });
+
+  // 📱 MERCHANT NOTIFICATION SYSTEM — professional, structured format
   const sendMerchantNotification = async (order: OrderDetails) => {
     const savedSettings = JSON.parse(localStorage.getItem("admin_settings") || "{}");
     // Respect the merchant's "auto notify" toggle — no popups/emails when it's off
@@ -612,44 +637,21 @@ function CheckoutModal() {
     // Nothing to do if notifications are switched off entirely
     if (notificationMethod === "none") return;
 
-    // Build order message
-    const itemsList = order.items.map((item) => `• ${item.name} x${item.quantity} = ₹${item.price * item.quantity}`).join("\n");
-    const message = `🎨 *NEW ORDER RECEIVED!* 🎨
-
-📋 *Order ID:* ${order.orderId}
-👤 *Customer:* ${order.shipping.fullName}
-📞 *Phone:* ${order.shipping.phone}
-📧 *Email:* ${order.shipping.email}
-
-📦 *Items:*
-${itemsList}
-
-💰 *Total:* ₹${order.total}
-💳 *Payment:* ${order.payment.method.toUpperCase()}
-
-📍 *Address:*
-${order.shipping.address}
-${order.shipping.city}, ${order.shipping.state} - ${order.shipping.pincode}
-
-⏰ *Time:* ${order.date}
-
----
-_ResinCraft - Handmade Resin Art_`;
+    // Professionally formatted WhatsApp message (structured layout, brand header,
+    // itemised bill summary — sent as HTML-encoded rich text through wa.me/CallMeBot)
+    const message = whatsappTemplates.orderPlaced(toNotifyOrder(order));
 
     // Method 1: WhatsApp Link (opens WhatsApp Web/App automatically)
     if (notificationMethod === "whatsapp_link" && merchantWhatsApp) {
-      const cleanNumber = merchantWhatsApp.replace(/\D/g, "");
-      const encodedMessage = encodeURIComponent(message);
-      const whatsappURL = `https://wa.me/${cleanNumber}?text=${encodedMessage}`;
-      
+      const whatsappURL = buildWhatsappLink(merchantWhatsApp, message);
       // Open WhatsApp in new tab
       window.open(whatsappURL, "_blank");
     }
 
-    // Method 2: Email notification (using mailto)
+    // Method 2: Email notification to the merchant (professional subject + formatted body)
     if (notificationMethod === "email" || notificationMethod === "both") {
-      const subject = encodeURIComponent(`New Order: ${order.orderId} - ₹${order.total}`);
-      const emailBody = encodeURIComponent(message.replace(/\*/g, ""));
+      const subject = encodeURIComponent(`New Order Received • #${order.orderId} — ₹${order.total.toLocaleString("en-IN")} — ResinCraft`);
+      const emailBody = encodeURIComponent(message.replace(/\*|_|~/g, ""));
       window.open(`mailto:${merchantEmail}?subject=${subject}&body=${emailBody}`, "_blank");
     }
 
@@ -707,10 +709,12 @@ _ResinCraft - Handmade Resin Art_`;
     // payment is completed successfully — notifications fire once payment succeeds.
   };
 
-  // 📧 AUTO EMAIL TO CUSTOMER WITH INVOICE
+  // 📧 AUTO ORDER-CONFIRMATION EMAIL TO CUSTOMER (professional HTML format)
+  // NOTE: This email intentionally does NOT include the invoice — the tax invoice is
+  // generated and emailed only after the order is marked as SHIPPED (see AdminPanel).
   const sendCustomerEmail = async (order: OrderDetails) => {
     const savedSettings = JSON.parse(localStorage.getItem("admin_settings") || "{}");
-    
+
     // Check if auto email is enabled and EmailJS is configured
     if (!savedSettings.autoEmailCustomer) {
       console.log("Auto email to customer is disabled");
@@ -718,7 +722,7 @@ _ResinCraft - Handmade Resin Art_`;
     }
 
     const { emailjsServiceId, emailjsTemplateId, emailjsPublicKey } = savedSettings;
-    
+
     if (!emailjsServiceId || !emailjsTemplateId || !emailjsPublicKey) {
       console.warn("EmailJS not configured. Please set up EmailJS in admin settings.");
       addToast("⚠️ Email not sent: EmailJS not configured", "error");
@@ -726,25 +730,31 @@ _ResinCraft - Handmade Resin Art_`;
     }
 
     try {
-      // Generate HTML and text versions of the email
-      const htmlContent = generateOrderEmailHTML(order);
-      const textContent = generateOrderEmailText(order);
+      const notifyOrder = toNotifyOrder(order);
+      const merchant = {
+        email: savedSettings.merchantEmail || "support@resincraft.in",
+        phone: savedSettings.merchantPhone || "",
+      };
+
+      // Professionally formatted HTML email + plain-text fallback
+      const htmlContent = buildOrderPlacedEmailHTML(notifyOrder, merchant);
+      const textContent = buildOrderPlacedEmailText(notifyOrder, merchant);
 
       // Prepare email parameters
       const templateParams = {
         to_email: order.shipping.email,
         to_name: order.shipping.fullName,
         from_name: "ResinCraft",
-        reply_to: savedSettings.merchantEmail || "support@resincraft.in",
-        subject: `Order Confirmation #${order.orderId} - ResinCraft`,
+        reply_to: merchant.email,
+        subject: `Order Confirmation • #${order.orderId} — ResinCraft`,
         message: textContent,
         html_message: htmlContent,
         order_id: order.orderId,
-        order_total: `₹${order.total.toLocaleString('en-IN')}`,
-        order_date: new Date(order.date).toLocaleDateString('en-IN', {
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric'
+        order_total: `₹${order.total.toLocaleString("en-IN")}`,
+        order_date: new Date(order.date).toLocaleDateString("en-IN", {
+          year: "numeric",
+          month: "long",
+          day: "numeric",
         }),
       };
 
@@ -756,17 +766,18 @@ _ResinCraft - Handmade Resin Art_`;
         emailjsPublicKey
       );
 
-      console.log("✅ Customer email sent successfully!");
-      addToast("📧 Invoice email sent to customer!", "success");
+      console.log("✅ Customer order-confirmation email sent successfully!");
+      addToast("📧 Order confirmation email sent to customer!", "success");
     } catch (error) {
       console.error("❌ Failed to send customer email:", error);
-      addToast("Failed to send invoice email", "error");
+      addToast("Failed to send order confirmation email", "error");
     }
   };
 
   // ✅ Single source of truth: called ONLY after a payment is completed successfully.
   // The order is then placed automatically — saved to the admin orders list, the merchant
-  // is notified and the customer receives the invoice email (just like other e-commerce sites).
+  // is notified and the customer receives a professional order-confirmation email.
+  // (The tax invoice is generated ONLY when the order is marked SHIPPED in the admin panel.)
   const finalizePaidOrder = async (order: OrderDetails) => {
     const paidOrder: OrderDetails = { ...order, paymentStatus: "paid" };
 
@@ -778,7 +789,7 @@ _ResinCraft - Handmade Resin Art_`;
     setStep(4);                                   // auto "Order Confirmed" screen
     addToast("Payment successful! Your order has been placed.", "success");
 
-    // 📱 Notify merchant + 📧 send invoice email automatically
+    // 📱 Notify merchant + 📧 send order-confirmation email automatically (invoice comes with shipping)
     await sendMerchantNotification(paidOrder);
     await sendCustomerEmail(paidOrder);
   };

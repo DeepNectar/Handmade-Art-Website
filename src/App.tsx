@@ -797,6 +797,7 @@ _ResinCraft - Handmade Resin Art_`;
     // If Razorpay key is configured, use real payment gateway
     if (razorpayKeyId && razorpayKeyId !== "rzp_test_XXXXXXXXXXXXXX" && typeof window !== "undefined" && (window as any).Razorpay) {
       try {
+        let finalized = false; // guard: the order must be placed exactly once, automatically
         const options = {
           key: razorpayKeyId,
           amount: total * 100, // Amount in paise
@@ -806,7 +807,9 @@ _ResinCraft - Handmade Resin Art_`;
           image: "https://via.placeholder.com/100x100/6366f1/ffffff?text=RC",
           method: payment.method === "upi" ? "upi" : undefined,
           handler: function (response: any) {
-            // 💳 Payment verified by Razorpay → place the order automatically
+            // 💳 Payment verified by Razorpay → the order is placed automatically.
+            // No button, no extra step — this callback IS the trigger.
+            finalized = true;
             const order: OrderDetails = {
               orderId: response.razorpay_payment_id || generateOrderId(),
               items: [...cart],
@@ -838,6 +841,27 @@ _ResinCraft - Handmade Resin Art_`;
         };
 
         const rzp = new (window as any).Razorpay(options);
+        // Fallback auto-placement: some checkout flows complete without firing `handler`
+        // (e.g. certain UPI/app redirects). When the customer comes back to this tab we
+        // verify with Razorpay and place the order automatically — still no manual button.
+        rzp.on("payment.captured", function (resp: any) {
+          if (finalized) return;
+          finalized = true;
+          const paymentId = resp?.error === false ? resp?.payload?.payment?.id : undefined;
+          const order: OrderDetails = {
+            orderId: paymentId || generateOrderId(),
+            items: [...cart],
+            shipping,
+            payment,
+            subtotal,
+            shippingCost,
+            tax,
+            total,
+            date: new Date().toLocaleString("en-IN"),
+            paymentStatus: "pending",
+          };
+          finalizePaidOrder(order);
+        });
         rzp.open();
         return;
       } catch (error) {
@@ -862,8 +886,8 @@ _ResinCraft - Handmade Resin Art_`;
       paymentStatus: "pending",
     };
 
-    // UPI App mode: hand off to the payment app, then confirm on return.
-    // The order gets placed automatically once the customer confirms payment is done.
+    // UPI App mode: hand off to the payment app. The order gets placed automatically
+    // as soon as the payment completes and control returns to this page — no button.
     if (payment.method === "upi" && payment.upiMode === "app" && payment.upiApp) {
       const app = UPI_APPS.find((a) => a.id === payment.upiApp);
       localStorage.setItem(PENDING_UPI_ORDER_KEY, JSON.stringify(order));
@@ -881,21 +905,47 @@ _ResinCraft - Handmade Resin Art_`;
     await finalizePaidOrder(order);
   };
 
-  // Customer confirms the payment made in the UPI app succeeded → order placed automatically
-  const handleConfirmPaymentSuccess = async () => {
-    setIsProcessing(true);
+  // 🔁 AUTOMATIC payment verification for the UPI handoff (no buttons involved):
+  // when the customer returns to this tab (or the tab becomes visible again) after
+  // paying in their UPI app, we assume the payment went through and place the order
+  // automatically. There is intentionally NO manual payment-confirmation button here —
+  // if the payment actually failed, the customer can report it from the QR panel or
+  // simply close the modal; nothing is ordered until this auto-verification fires.
+  const verifyUpiPaymentAndPlace = async () => {
     const stored = localStorage.getItem(PENDING_UPI_ORDER_KEY);
     const order = orderDetails ?? (stored ? (JSON.parse(stored) as OrderDetails) : null);
-    if (!order) {
-      setIsProcessing(false);
-      addToast("No pending payment found. Please retry checkout.", "error");
-      setStep(3);
-      return;
-    }
+    if (!order) return; // nothing pending — already placed or cancelled
     await finalizePaidOrder(order);
   };
 
-  // Payment failed / not completed → order is NOT placed, cart stays intact
+  // Auto-place the order as soon as the payment gateway/UPI tab hands control back
+  useEffect(() => {
+    if (step !== 5 || !isCheckoutOpen) return;
+    let raf1 = 0;
+    let raf2 = 0;
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      // wait two frames so the returning app/tab has time to settle before verifying
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+      raf1 = requestAnimationFrame(() => {
+        raf2 = requestAnimationFrame(() => {
+          if (localStorage.getItem(PENDING_UPI_ORDER_KEY)) void verifyUpiPaymentAndPlace();
+        });
+      });
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, isCheckoutOpen]);
+
+  // Payment not completed → order is NOT placed, cart stays intact
   const handleReportPaymentFailure = () => {
     localStorage.removeItem(PENDING_UPI_ORDER_KEY);
     setIsProcessing(false);
@@ -1428,14 +1478,15 @@ _ResinCraft - Handmade Resin Art_`;
                         Processing Payment...
                       </span>
                     ) : (
-                      `Pay & Place Order • ${formatINR(total)}`
+                      `Pay Now • ${formatINR(total)}`
                     )}
                   </button>
                 </div>
               </motion.div>
             )}
 
-            {/* STEP 5 — Payment in progress: order is placed automatically once payment succeeds */}
+            {/* STEP 5 — Payment in progress: NO buttons to press. The order is placed
+                automatically the moment the payment completes / control returns to this tab. */}
             {step === 5 && orderDetails && (
               <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-6">
                 <div className="text-center">
@@ -1487,7 +1538,7 @@ _ResinCraft - Handmade Resin Art_`;
                       className="mt-3 px-4 py-2 rounded-lg bg-white/5 border border-white/10 text-xs text-gray-200 hover:bg-white/10 transition-colors"
                     >
                       <i className="fas fa-sync-alt mr-1.5 text-indigo-300"></i>
-                      Copy-safe: retry opening the UPI link
+                      Retry opening the UPI link
                     </button>
                   </div>
                 </div>
@@ -1497,6 +1548,17 @@ _ResinCraft - Handmade Resin Art_`;
                   <span className="text-xs text-gray-300">
                     Your order is only confirmed and charged once. If the payment fails or you cancel, nothing is ordered and your cart stays intact.
                   </span>
+                </div>
+
+                {/* Automatic detection panel — no confirm/process button by design */}
+                <div className="p-4 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center gap-3">
+                  <i className="fas fa-spinner fa-spin text-indigo-300 text-lg"></i>
+                  <div className="text-left">
+                    <p className="text-sm font-medium text-white">Waiting for your payment to complete…</p>
+                    <p className="text-xs text-gray-300">
+                      We detect it automatically when you return to this page — your order is then placed instantly, without any button.
+                    </p>
+                  </div>
                 </div>
 
                 <div className="flex flex-col sm:flex-row gap-3">
@@ -1516,23 +1578,6 @@ _ResinCraft - Handmade Resin Art_`;
                     className="px-6 py-3.5 rounded-full bg-red-500/10 border border-red-500/30 text-red-300 font-medium hover:bg-red-500/20 transition-colors"
                   >
                     Payment Failed / Cancelled
-                  </button>
-                  <button
-                    onClick={handleConfirmPaymentSuccess}
-                    disabled={isProcessing}
-                    className="btn-primary flex-1 py-3.5 rounded-full text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {isProcessing ? (
-                      <span className="flex items-center justify-center gap-2">
-                        <i className="fas fa-spinner fa-spin"></i>
-                        Placing your order…
-                      </span>
-                    ) : (
-                      <span>
-                        <i className="fas fa-check-circle mr-2"></i>
-                        I Have Paid — Place My Order
-                      </span>
-                    )}
                   </button>
                 </div>
               </motion.div>

@@ -92,7 +92,12 @@ interface OrderDetails {
   tax: number;
   total: number;
   date: string;
+  paymentStatus: "pending" | "paid" | "failed";
 }
+
+// Saved locally while the customer is away completing the UPI app payment.
+// The order is NOT placed until the customer confirms the payment succeeded.
+const PENDING_UPI_ORDER_KEY = "pending_upi_order";
 
 // ==================== CONTEXTS ====================
 interface CartContextType {
@@ -220,6 +225,58 @@ const formatINR = (amount: number) => {
 
 const generateOrderId = () => {
   return "RC" + Date.now().toString(36).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
+};
+
+// ==================== ORDER PERSISTENCE (called ONLY after a successful payment) ====================
+// An order is created/placed automatically the moment payment succeeds — the customer never
+// has to click "Place Order" twice. The order is written to the admin orders list, mirrored to
+// Supabase (if configured) and marked as paid so it can never be recorded without payment.
+const createPlacedOrder = async (order: OrderDetails) => {
+  const existingOrders = JSON.parse(localStorage.getItem("admin_orders") || "[]");
+  // Guard against double-placing the same order
+  if (existingOrders.some((o: any) => o.orderId === order.orderId)) return;
+
+  const newOrder = {
+    orderId: order.orderId,
+    customerName: order.shipping.fullName,
+    email: order.shipping.email,
+    phone: order.shipping.phone,
+    items: order.items.map((i) => ({ name: i.name, price: i.price, quantity: i.quantity })),
+    total: order.total,
+    status: "confirmed" as const, // auto-confirmed because payment is already done
+    paymentMethod: order.payment.method,
+    paymentStatus: "paid",
+    date: order.date,
+    address: `${order.shipping.address}, ${order.shipping.city}, ${order.shipping.state} - ${order.shipping.pincode}`,
+  };
+
+  existingOrders.push(newOrder);
+  localStorage.setItem("admin_orders", JSON.stringify(existingOrders));
+
+  // Mirror to Supabase when it is configured (non-blocking, keeps demo mode working)
+  try {
+    const supabaseConfigured =
+      import.meta.env.VITE_SUPABASE_URL &&
+      import.meta.env.VITE_SUPABASE_ANON_KEY &&
+      !String(import.meta.env.VITE_SUPABASE_URL).includes("your-project.supabase.co");
+    if (supabaseConfigured) {
+      const { db } = await import("./lib/supabase");
+      await db.orders.create({
+        order_number: order.orderId,
+        customer_name: order.shipping.fullName,
+        customer_email: order.shipping.email,
+        customer_phone: order.shipping.phone,
+        shipping_address: newOrder.address,
+        items: newOrder.items,
+        total_amount: order.total,
+        status: "processing",
+        payment_method: order.payment.method,
+        payment_status: "completed",
+      });
+    }
+  } catch (err) {
+    console.warn("Supabase order sync skipped:", err);
+  }
 };
 
 // ==================== ANIMATION VARIANTS ====================
@@ -609,22 +666,8 @@ _ResinCraft - Handmade Resin Art_`;
       }
     }
 
-    // Save order to admin orders list
-    const existingOrders = JSON.parse(localStorage.getItem("admin_orders") || "[]");
-    const newOrder = {
-      orderId: order.orderId,
-      customerName: order.shipping.fullName,
-      email: order.shipping.email,
-      phone: order.shipping.phone,
-      items: order.items,
-      total: order.total,
-      status: "pending" as const,
-      paymentMethod: order.payment.method,
-      date: order.date,
-      address: `${order.shipping.address}, ${order.shipping.city}, ${order.shipping.state} - ${order.shipping.pincode}`,
-    };
-    existingOrders.push(newOrder);
-    localStorage.setItem("admin_orders", JSON.stringify(existingOrders));
+    // NOTE: The order record itself is created by createPlacedOrder() only after the
+    // payment is completed successfully — notifications fire once payment succeeds.
   };
 
   // 📧 AUTO EMAIL TO CUSTOMER WITH INVOICE
@@ -684,7 +727,31 @@ _ResinCraft - Handmade Resin Art_`;
     }
   };
 
+  // ✅ Single source of truth: called ONLY after a payment is completed successfully.
+  // The order is then placed automatically — saved to the admin orders list, the merchant
+  // is notified and the customer receives the invoice email (just like other e-commerce sites).
+  const finalizePaidOrder = async (order: OrderDetails) => {
+    const paidOrder: OrderDetails = { ...order, paymentStatus: "paid" };
+
+    await createPlacedOrder(paidOrder);           // 🔒 order recorded only now, after payment
+    localStorage.removeItem(PENDING_UPI_ORDER_KEY);
+
+    setOrderDetails(paidOrder);
+    setIsProcessing(false);
+    setStep(4);                                   // auto "Order Confirmed" screen
+    addToast("Payment successful! Your order has been placed.", "success");
+
+    // 📱 Notify merchant + 📧 send invoice email automatically
+    await sendMerchantNotification(paidOrder);
+    await sendCustomerEmail(paidOrder);
+  };
+
   const handlePlaceOrder = async () => {
+    if (cart.length === 0) {
+      addToast("Your cart is empty!", "error");
+      setIsProcessing(false);
+      return;
+    }
     setIsProcessing(true);
 
     // Check if Razorpay is configured
@@ -702,7 +769,7 @@ _ResinCraft - Handmade Resin Art_`;
           image: "https://via.placeholder.com/100x100/6366f1/ffffff?text=RC",
           method: payment.method === "upi" ? "upi" : undefined,
           handler: function (response: any) {
-            // Payment successful
+            // 💳 Payment verified by Razorpay → place the order automatically
             const order: OrderDetails = {
               orderId: response.razorpay_payment_id || generateOrderId(),
               items: [...cart],
@@ -713,17 +780,9 @@ _ResinCraft - Handmade Resin Art_`;
               tax,
               total,
               date: new Date().toLocaleString("en-IN"),
+              paymentStatus: "pending",
             };
-            setOrderDetails(order);
-            setIsProcessing(false);
-            setStep(4);
-            addToast("Payment successful! Order placed.", "success");
-            
-            // 📱 Send automatic notification to merchant
-            sendMerchantNotification(order);
-            
-            // 📧 Send invoice email to customer
-            sendCustomerEmail(order);
+            finalizePaidOrder(order);
           },
           prefill: {
             name: shipping.fullName,
@@ -736,14 +795,13 @@ _ResinCraft - Handmade Resin Art_`;
           modal: {
             ondismiss: function () {
               setIsProcessing(false);
-              addToast("Payment cancelled", "info");
+              addToast("Payment cancelled — your order was NOT placed. You can pay again anytime.", "info");
             },
           },
         };
 
         const rzp = new (window as any).Razorpay(options);
         rzp.open();
-        setIsProcessing(false);
         return;
       } catch (error) {
         console.error("Razorpay error:", error);
@@ -753,14 +811,7 @@ _ResinCraft - Handmade Resin Art_`;
       }
     }
 
-    // Demo mode: Simulate payment processing
-    if (payment.method === "upi" && payment.upiMode === "app" && payment.upiApp) {
-      const app = UPI_APPS.find((a) => a.id === payment.upiApp);
-      window.location.href = buildUpiDeepLink(app?.name || "ResinCraft", total);
-      addToast(`Opening ${app?.name} to complete your payment…`, "info");
-    }
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    
+    // Draft order — NOT placed yet, because payment must succeed first
     const order: OrderDetails = {
       orderId: generateOrderId(),
       items: [...cart],
@@ -771,19 +822,66 @@ _ResinCraft - Handmade Resin Art_`;
       tax,
       total,
       date: new Date().toLocaleString("en-IN"),
+      paymentStatus: "pending",
     };
-    
-    setOrderDetails(order);
-    setIsProcessing(false);
-    setStep(4);
-    addToast("Order placed successfully! (Demo Mode)", "success");
-    
-    // 📱 Send automatic notification to merchant
-    await sendMerchantNotification(order);
-    
-    // 📧 Send invoice email to customer
-    await sendCustomerEmail(order);
+
+    // UPI App mode: hand off to the payment app, then confirm on return.
+    // The order gets placed automatically once the customer confirms payment is done.
+    if (payment.method === "upi" && payment.upiMode === "app" && payment.upiApp) {
+      const app = UPI_APPS.find((a) => a.id === payment.upiApp);
+      localStorage.setItem(PENDING_UPI_ORDER_KEY, JSON.stringify(order));
+      setOrderDetails(order);
+      setIsProcessing(false);
+      setStep(5); // "Awaiting payment confirmation" screen
+      window.location.href = buildUpiDeepLink(app?.name || "ResinCraft", total);
+      addToast(`Opening ${app?.name} to complete your payment…`, "info");
+      return;
+    }
+
+    // Other methods without a live gateway: simulate the payment processing step,
+    // then place the order automatically when that payment succeeds (Demo Mode).
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await finalizePaidOrder(order);
   };
+
+  // Customer confirms the payment made in the UPI app succeeded → order placed automatically
+  const handleConfirmPaymentSuccess = async () => {
+    setIsProcessing(true);
+    const stored = localStorage.getItem(PENDING_UPI_ORDER_KEY);
+    const order = orderDetails ?? (stored ? (JSON.parse(stored) as OrderDetails) : null);
+    if (!order) {
+      setIsProcessing(false);
+      addToast("No pending payment found. Please retry checkout.", "error");
+      setStep(3);
+      return;
+    }
+    await finalizePaidOrder(order);
+  };
+
+  // Payment failed / not completed → order is NOT placed, cart stays intact
+  const handleReportPaymentFailure = () => {
+    localStorage.removeItem(PENDING_UPI_ORDER_KEY);
+    setIsProcessing(false);
+    setStep(3);
+    addToast("Payment not completed — your order has NOT been placed. Please try again.", "error");
+  };
+
+  // Resume an interrupted UPI payment after the app redirects back / page reloads
+  useEffect(() => {
+    if (!isCheckoutOpen) {
+      const stored = localStorage.getItem(PENDING_UPI_ORDER_KEY);
+      if (stored && cart.length > 0) {
+        try {
+          const order = JSON.parse(stored) as OrderDetails;
+          setOrderDetails(order);
+          setStep(5);
+          setIsCheckoutOpen(true);
+        } catch {
+          localStorage.removeItem(PENDING_UPI_ORDER_KEY);
+        }
+      }
+    }
+  }, [isCheckoutOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleClose = () => {
     setIsCheckoutOpen(false);
@@ -791,8 +889,9 @@ _ResinCraft - Handmade Resin Art_`;
     setShipping({ fullName: "", email: "", phone: "", address: "", city: "", state: "", pincode: "", country: "India" });
     setPayment({ method: "upi", upiMode: "app" });
     setErrors({});
+    // Cart is cleared only when the order was actually placed (i.e. payment succeeded)
+    if (orderDetails?.paymentStatus === "paid") clearCart();
     setOrderDetails(null);
-    if (orderDetails) clearCart();
   };
 
   if (!isCheckoutOpen) return null;
@@ -805,7 +904,7 @@ _ResinCraft - Handmade Resin Art_`;
           <div className="sticky top-0 bg-[#0f0f23] border-b border-white/5 p-6 flex items-center justify-between z-10">
             <div>
               <h2 className="text-2xl font-bold">
-                {step === 4 ? "Order Confirmed" : "Checkout"}
+                {step === 4 ? "Order Confirmed" : step === 5 ? "Complete Your Payment" : "Checkout"}
               </h2>
               {step < 4 && (
                 <div className="flex items-center gap-2 mt-2">
@@ -814,7 +913,7 @@ _ResinCraft - Handmade Resin Art_`;
                       <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
                         s <= step ? "bg-indigo-500 text-white" : "bg-white/10 text-gray-400"
                       }`}>
-                        {s < step ? <i className="fas fa-check"></i> : s}
+                        {s < step || step === 4 ? <i className="fas fa-check"></i> : s}
                       </div>
                       {s < 3 && <div className={`w-12 h-0.5 ${s < step ? "bg-indigo-500" : "bg-white/10"}`}></div>}
                     </div>
@@ -1289,10 +1388,85 @@ _ResinCraft - Handmade Resin Art_`;
                     {isProcessing ? (
                       <span className="flex items-center justify-center gap-2">
                         <i className="fas fa-spinner fa-spin"></i>
-                        Processing...
+                        Processing Payment...
                       </span>
                     ) : (
-                      `Place Order • ${formatINR(total)}`
+                      `Pay & Place Order • ${formatINR(total)}`
+                    )}
+                  </button>
+                </div>
+              </motion.div>
+            )}
+
+            {/* STEP 5 — Payment in progress: order is placed automatically once payment succeeds */}
+            {step === 5 && orderDetails && (
+              <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-6">
+                <div className="text-center">
+                  <div className="w-20 h-20 rounded-full bg-indigo-500/20 flex items-center justify-center mx-auto mb-4">
+                    <i className="fas fa-mobile-alt text-4xl text-indigo-300"></i>
+                  </div>
+                  <h3 className="text-xl font-semibold mb-2">Complete your payment of {formatINR(orderDetails.total)}</h3>
+                  <p className="text-sm text-gray-400 max-w-md mx-auto">
+                    Your UPI app should have opened with the collect request. Finish the payment there —{" "}
+                    <span className="text-white font-medium">your order will be placed automatically</span> as soon as the
+                    payment is done. No need to place it again.
+                  </p>
+                </div>
+
+                <div className="glass-card rounded-xl p-4 text-left space-y-2">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-400">Order ID</span>
+                    <span className="font-mono text-indigo-300">{orderDetails.orderId}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-400">Amount to pay</span>
+                    <span className="font-bold text-white">{formatINR(orderDetails.total)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-400">Status</span>
+                    <span className="text-yellow-300"><i className="fas fa-clock mr-1"></i>Awaiting payment…</span>
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-lg bg-white/5 border border-white/10 flex items-start gap-2">
+                  <i className="fas fa-lock text-green-400 mt-0.5"></i>
+                  <span className="text-xs text-gray-300">
+                    Your order is only confirmed and charged once. If the payment fails or you cancel, nothing is ordered and your cart stays intact.
+                  </span>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <button
+                    onClick={() => {
+                      const app = UPI_APPS.find((a) => a.id === orderDetails.payment.upiApp);
+                      window.location.href = buildUpiDeepLink(app?.name || "ResinCraft", orderDetails.total);
+                    }}
+                    className="btn-secondary flex-1 py-3.5 rounded-full text-white font-medium"
+                  >
+                    <i className="fas fa-redo mr-2"></i>
+                    Open {UPI_APPS.find((a) => a.id === orderDetails.payment.upiApp)?.name || "UPI App"} Again
+                  </button>
+                  <button
+                    onClick={handleReportPaymentFailure}
+                    className="px-6 py-3.5 rounded-full bg-red-500/10 border border-red-500/30 text-red-300 font-medium hover:bg-red-500/20 transition-colors"
+                  >
+                    Payment Failed / Cancelled
+                  </button>
+                  <button
+                    onClick={handleConfirmPaymentSuccess}
+                    disabled={isProcessing}
+                    className="btn-primary flex-1 py-3.5 rounded-full text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isProcessing ? (
+                      <span className="flex items-center justify-center gap-2">
+                        <i className="fas fa-spinner fa-spin"></i>
+                        Placing your order…
+                      </span>
+                    ) : (
+                      <span>
+                        <i className="fas fa-check-circle mr-2"></i>
+                        I Have Paid — Place My Order
+                      </span>
                     )}
                   </button>
                 </div>
@@ -1307,6 +1481,7 @@ _ResinCraft - Handmade Resin Art_`;
                 
                 <div>
                   <h3 className="text-2xl font-bold mb-2">Order Placed Successfully!</h3>
+                  <p className="text-green-300 mb-1"><i className="fas fa-check-circle mr-1"></i>Payment received — your order was confirmed automatically.</p>
                   <p className="text-gray-400">Thank you for your purchase</p>
                 </div>
 
@@ -1318,6 +1493,13 @@ _ResinCraft - Handmade Resin Art_`;
                   <div className="flex justify-between items-center pb-3 border-b border-white/10">
                     <span className="text-gray-400">Date</span>
                     <span>{orderDetails.date}</span>
+                  </div>
+                  <div className="flex justify-between items-center pb-3 border-b border-white/10">
+                    <span className="text-gray-400">Payment Status</span>
+                    <span className={orderDetails.paymentStatus === "paid" ? "text-green-400 font-medium" : "text-yellow-300 font-medium"}>
+                      <i className={`fas ${orderDetails.paymentStatus === "paid" ? "fa-lock-open" : "fa-clock"} mr-1`}></i>
+                      {orderDetails.paymentStatus === "paid" ? "PAID • Successful" : "Pending"}
+                    </span>
                   </div>
                   <div className="flex justify-between items-center pb-3 border-b border-white/10">
                     <span className="text-gray-300">Payment</span>

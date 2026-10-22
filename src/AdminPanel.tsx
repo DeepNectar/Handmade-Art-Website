@@ -24,6 +24,7 @@ interface AdminOrder {
   total: number;
   status: "pending" | "confirmed" | "shipped" | "delivered" | "cancelled";
   paymentMethod: string;
+  paymentStatus?: "pending" | "paid" | "failed";
   date: string;
   address: string;
 }
@@ -781,6 +782,11 @@ function OrdersView({
                   <div className="flex items-center gap-3 mb-2">
                     <span className="font-mono text-sm text-indigo-300">{order.orderId}</span>
                     <OrderStatusBadge status={order.status} />
+                    {order.paymentStatus === "paid" && (
+                      <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/30">
+                        <i className="fas fa-check-circle mr-1"></i>Paid
+                      </span>
+                    )}
                   </div>
                   <p className="font-medium">{order.customerName}</p>
                   <p className="text-xs text-gray-300">{order.email} • {order.phone}</p>
@@ -917,10 +923,16 @@ function OrderDetailModal({
 
           {/* Payment & Date */}
           <div className="glass-card rounded-xl p-4">
-            <div className="grid grid-cols-2 gap-3 text-sm">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
               <div>
                 <p className="text-gray-300">Payment Method</p>
                 <p className="font-medium capitalize">{order.paymentMethod}</p>
+              </div>
+              <div>
+                <p className="text-gray-300">Payment Status</p>
+                <p className={`font-medium ${order.paymentStatus === "paid" ? "text-green-400" : order.paymentStatus === "failed" ? "text-red-400" : "text-yellow-300"}`}>
+                  {order.paymentStatus === "paid" ? "Paid • Successful" : order.paymentStatus === "failed" ? "Failed" : order.paymentStatus === "pending" ? "Pending" : "—"}
+                </p>
               </div>
               <div>
                 <p className="text-gray-300">Order Date</p>

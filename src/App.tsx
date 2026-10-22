@@ -25,6 +25,30 @@ const products = [
   { id: 6, name: "Marble Coaster Set (4)", price: 3500, medium: "Resin Coasters", size: '4" × 4" each', image: IMAGES.product6, tag: "Gift Set", description: "Set of 4 handmade marble-effect resin coasters." },
 ];
 
+// ==================== UPI APPS (deep links to open & pay directly) ====================
+const UPI_APPS = [
+  { id: "gpay", name: "Google Pay", icon: "fab fa-google-pay", color: "text-blue-300", bg: "bg-blue-500/20", link: "gpupi://pay", badge: "GPay" },
+  { id: "phonepe", name: "PhonePe", icon: "fas fa-mobile-alt", color: "text-purple-300", bg: "bg-purple-500/20", link: "phonepe://pay", badge: "PhonePe" },
+  { id: "paytm", name: "Paytm", icon: "fas fa-wallet", color: "text-indigo-300", bg: "bg-indigo-500/20", link: "paytmmp://pay", badge: "Paytm" },
+  { id: "bhim", name: "BHIM", icon: "fas fa-rupee-sign", color: "text-orange-300", bg: "bg-orange-500/20", link: "upi://pay", badge: "BHIM" },
+  { id: "amazonpay", name: "Amazon Pay", icon: "fab fa-amazon", color: "text-yellow-300", bg: "bg-yellow-500/20", link: "amazonpay://pay", badge: "AmznPay" },
+  { id: "any", name: "Any UPI App", icon: "fas fa-th-large", color: "text-cyan-300", bg: "bg-cyan-500/20", link: "upi://pay", badge: "Any" },
+];
+
+// Build a standard UPI deep link (works with any UPI app on the device)
+const buildUpiDeepLink = (appName: string, amount: number) => {
+  const savedSettings = JSON.parse(localStorage.getItem("admin_settings") || "{}");
+  const merchantVpa = savedSettings.merchantUpiId || "resincraft@upi"; // set your real UPI ID in Admin > Settings
+  const params = new URLSearchParams({
+    pa: merchantVpa,
+    pn: appName,
+    am: String(amount),
+    cu: "INR",
+    tn: "ResinCraft Order Payment",
+  });
+  return `upi://pay?${params.toString()}`;
+};
+
 // ==================== TYPES ====================
 interface CartItem {
   id: number;
@@ -47,6 +71,8 @@ interface ShippingInfo {
 
 interface PaymentInfo {
   method: "upi" | "card" | "netbanking" | "wallet";
+  upiMode: "app" | "manual";
+  upiApp?: string;
   upiId?: string;
   cardNumber?: string;
   cardName?: string;
@@ -358,8 +384,8 @@ function CartSidebar() {
             <div className="flex-1 overflow-y-auto p-6 space-y-4">
               {cart.length === 0 ? (
                 <div className="text-center py-16">
-                  <i className="fas fa-shopping-bag text-4xl text-gray-600 mb-4"></i>
-                  <p className="text-gray-500">Your cart is empty</p>
+                  <i className="fas fa-shopping-bag text-4xl text-gray-400 mb-4"></i>
+                  <p className="text-gray-300">Your cart is empty</p>
                   <button onClick={() => { setIsCartOpen(false); const el = document.getElementById("collection"); if (el) el.scrollIntoView({ behavior: "smooth" }); }} className="btn-primary px-6 py-2 rounded-full text-sm font-medium text-white mt-4">
                     Browse Collection
                   </button>
@@ -376,7 +402,7 @@ function CartSidebar() {
                           <button onClick={() => updateQuantity(item.id, item.quantity - 1)} className="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center text-xs hover:bg-white/20 transition-colors">−</button>
                           <span className="text-sm w-6 text-center">{item.quantity}</span>
                           <button onClick={() => updateQuantity(item.id, item.quantity + 1)} className="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center text-xs hover:bg-white/20 transition-colors">+</button>
-                          <button onClick={() => { removeFromCart(item.id); addToast(`${item.name} removed from cart`, "info"); }} className="ml-auto text-gray-500 hover:text-red-400 transition-colors text-sm">
+                          <button onClick={() => { removeFromCart(item.id); addToast(`${item.name} removed from cart`, "info"); }} className="ml-auto text-gray-300 hover:text-red-400 transition-colors text-sm">
                             <i className="fas fa-trash-alt"></i>
                           </button>
                         </div>
@@ -393,11 +419,11 @@ function CartSidebar() {
                   <span className="text-gray-400">Subtotal</span>
                   <span className="text-xl font-bold text-gradient">{formatINR(totalPrice)}</span>
                 </div>
-                <p className="text-xs text-gray-500">Free shipping across India on orders above ₹5,000</p>
+                <p className="text-xs text-gray-300">Free shipping across India on orders above ₹5,000</p>
                 <button onClick={handleProceedToCheckout} className="btn-primary w-full py-3.5 rounded-full text-white font-medium">
                   Proceed to Checkout
                 </button>
-                <button onClick={() => { clearCart(); addToast("Cart cleared", "info"); }} className="w-full py-2 text-sm text-gray-500 hover:text-gray-300 transition-colors">
+                <button onClick={() => { clearCart(); addToast("Cart cleared", "info"); }} className="w-full py-2 text-sm text-gray-300 hover:text-white transition-colors">
                   Clear Cart
                 </button>
               </div>
@@ -424,7 +450,7 @@ function CheckoutModal() {
     pincode: "",
     country: "India",
   });
-  const [payment, setPayment] = useState<PaymentInfo>({ method: "upi" });
+  const [payment, setPayment] = useState<PaymentInfo>({ method: "upi", upiMode: "app" });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [orderDetails, setOrderDetails] = useState<OrderDetails | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -453,8 +479,12 @@ function CheckoutModal() {
   const validatePayment = (): boolean => {
     const newErrors: Record<string, string> = {};
     if (payment.method === "upi") {
-      if (!payment.upiId?.trim()) newErrors.upiId = "UPI ID is required";
-      else if (!/^[a-zA-Z0-9._-]+@[a-zA-Z]+$/.test(payment.upiId)) newErrors.upiId = "Invalid UPI ID format";
+      if (payment.upiMode === "app") {
+        if (!payment.upiApp) newErrors.upiApp = "Please select a UPI app to pay with";
+      } else {
+        if (!payment.upiId?.trim()) newErrors.upiId = "UPI ID is required";
+        else if (!/^[a-zA-Z0-9._-]+@[a-zA-Z]+$/.test(payment.upiId)) newErrors.upiId = "Invalid UPI ID format";
+      }
     } else if (payment.method === "card") {
       if (!payment.cardNumber?.trim()) newErrors.cardNumber = "Card number is required";
       else if (!/^\d{16}$/.test(payment.cardNumber.replace(/\s/g, ""))) newErrors.cardNumber = "Invalid card number (16 digits)";
@@ -670,6 +700,7 @@ _ResinCraft - Handmade Resin Art_`;
           name: "ResinCraft",
           description: "Handmade Resin Art Order",
           image: "https://via.placeholder.com/100x100/6366f1/ffffff?text=RC",
+          method: payment.method === "upi" ? "upi" : undefined,
           handler: function (response: any) {
             // Payment successful
             const order: OrderDetails = {
@@ -723,6 +754,11 @@ _ResinCraft - Handmade Resin Art_`;
     }
 
     // Demo mode: Simulate payment processing
+    if (payment.method === "upi" && payment.upiMode === "app" && payment.upiApp) {
+      const app = UPI_APPS.find((a) => a.id === payment.upiApp);
+      window.location.href = buildUpiDeepLink(app?.name || "ResinCraft", total);
+      addToast(`Opening ${app?.name} to complete your payment…`, "info");
+    }
     await new Promise((resolve) => setTimeout(resolve, 2000));
     
     const order: OrderDetails = {
@@ -753,7 +789,7 @@ _ResinCraft - Handmade Resin Art_`;
     setIsCheckoutOpen(false);
     setStep(1);
     setShipping({ fullName: "", email: "", phone: "", address: "", city: "", state: "", pincode: "", country: "India" });
-    setPayment({ method: "upi" });
+    setPayment({ method: "upi", upiMode: "app" });
     setErrors({});
     setOrderDetails(null);
     if (orderDetails) clearCart();
@@ -763,7 +799,7 @@ _ResinCraft - Handmade Resin Art_`;
 
   return (
     <AnimatePresence>
-      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-black/80 backdrop-blur-md z-[80] flex items-center justify-center p-4 overflow-y-auto">
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-black/80 backdrop-blur-md text-white z-[80] flex items-center justify-center p-4 overflow-y-auto">
         <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="bg-[#0f0f23] border border-indigo-500/20 rounded-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto my-8">
           {/* Header */}
           <div className="sticky top-0 bg-[#0f0f23] border-b border-white/5 p-6 flex items-center justify-between z-10">
@@ -776,7 +812,7 @@ _ResinCraft - Handmade Resin Art_`;
                   {[1, 2, 3].map((s) => (
                     <div key={s} className="flex items-center gap-2">
                       <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
-                        s <= step ? "bg-indigo-500 text-white" : "bg-white/10 text-gray-500"
+                        s <= step ? "bg-indigo-500 text-white" : "bg-white/10 text-gray-400"
                       }`}>
                         {s < step ? <i className="fas fa-check"></i> : s}
                       </div>
@@ -799,96 +835,96 @@ _ResinCraft - Handmade Resin Art_`;
                 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm text-gray-400 mb-2">Full Name *</label>
+                    <label className="block text-sm text-gray-300 mb-2">Full Name *</label>
                     <input
                       type="text"
                       value={shipping.fullName}
                       onChange={(e) => setShipping({ ...shipping, fullName: e.target.value })}
-                      className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.fullName ? "border-red-500" : "border-white/10"} text-white focus:outline-none focus:border-indigo-500 transition-colors`}
+                      className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.fullName ? "border-red-500" : "border-white/10"} text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors`}
                       placeholder="John Doe"
                     />
                     {errors.fullName && <p className="text-red-400 text-xs mt-1">{errors.fullName}</p>}
                   </div>
                   
                   <div>
-                    <label className="block text-sm text-gray-400 mb-2">Email *</label>
+                    <label className="block text-sm text-gray-300 mb-2">Email *</label>
                     <input
                       type="email"
                       value={shipping.email}
                       onChange={(e) => setShipping({ ...shipping, email: e.target.value })}
-                      className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.email ? "border-red-500" : "border-white/10"} text-white focus:outline-none focus:border-indigo-500 transition-colors`}
+                      className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.email ? "border-red-500" : "border-white/10"} text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors`}
                       placeholder="john@example.com"
                     />
                     {errors.email && <p className="text-red-400 text-xs mt-1">{errors.email}</p>}
                   </div>
                   
                   <div>
-                    <label className="block text-sm text-gray-400 mb-2">Phone Number *</label>
+                    <label className="block text-sm text-gray-300 mb-2">Phone Number *</label>
                     <input
                       type="tel"
                       value={shipping.phone}
                       onChange={(e) => setShipping({ ...shipping, phone: e.target.value })}
-                      className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.phone ? "border-red-500" : "border-white/10"} text-white focus:outline-none focus:border-indigo-500 transition-colors`}
+                      className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.phone ? "border-red-500" : "border-white/10"} text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors`}
                       placeholder="9876543210"
                     />
                     {errors.phone && <p className="text-red-400 text-xs mt-1">{errors.phone}</p>}
                   </div>
                   
                   <div className="md:col-span-2">
-                    <label className="block text-sm text-gray-400 mb-2">Address *</label>
+                    <label className="block text-sm text-gray-300 mb-2">Address *</label>
                     <textarea
                       value={shipping.address}
                       onChange={(e) => setShipping({ ...shipping, address: e.target.value })}
                       rows={3}
-                      className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.address ? "border-red-500" : "border-white/10"} text-white focus:outline-none focus:border-indigo-500 transition-colors resize-none`}
+                      className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.address ? "border-red-500" : "border-white/10"} text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors resize-none`}
                       placeholder="House no, Street, Landmark"
                     />
                     {errors.address && <p className="text-red-400 text-xs mt-1">{errors.address}</p>}
                   </div>
                   
                   <div>
-                    <label className="block text-sm text-gray-400 mb-2">City *</label>
+                    <label className="block text-sm text-gray-300 mb-2">City *</label>
                     <input
                       type="text"
                       value={shipping.city}
                       onChange={(e) => setShipping({ ...shipping, city: e.target.value })}
-                      className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.city ? "border-red-500" : "border-white/10"} text-white focus:outline-none focus:border-indigo-500 transition-colors`}
+                      className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.city ? "border-red-500" : "border-white/10"} text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors`}
                       placeholder="Mumbai"
                     />
                     {errors.city && <p className="text-red-400 text-xs mt-1">{errors.city}</p>}
                   </div>
                   
                   <div>
-                    <label className="block text-sm text-gray-400 mb-2">State *</label>
+                    <label className="block text-sm text-gray-300 mb-2">State *</label>
                     <input
                       type="text"
                       value={shipping.state}
                       onChange={(e) => setShipping({ ...shipping, state: e.target.value })}
-                      className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.state ? "border-red-500" : "border-white/10"} text-white focus:outline-none focus:border-indigo-500 transition-colors`}
+                      className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.state ? "border-red-500" : "border-white/10"} text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors`}
                       placeholder="Maharashtra"
                     />
                     {errors.state && <p className="text-red-400 text-xs mt-1">{errors.state}</p>}
                   </div>
                   
                   <div>
-                    <label className="block text-sm text-gray-400 mb-2">Pincode *</label>
+                    <label className="block text-sm text-gray-300 mb-2">Pincode *</label>
                     <input
                       type="text"
                       value={shipping.pincode}
                       onChange={(e) => setShipping({ ...shipping, pincode: e.target.value })}
-                      className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.pincode ? "border-red-500" : "border-white/10"} text-white focus:outline-none focus:border-indigo-500 transition-colors`}
+                      className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.pincode ? "border-red-500" : "border-white/10"} text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors`}
                       placeholder="400001"
                     />
                     {errors.pincode && <p className="text-red-400 text-xs mt-1">{errors.pincode}</p>}
                   </div>
                   
                   <div>
-                    <label className="block text-sm text-gray-400 mb-2">Country</label>
+                    <label className="block text-sm text-gray-300 mb-2">Country</label>
                     <input
                       type="text"
                       value={shipping.country}
                       disabled
-                      className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-gray-500 cursor-not-allowed"
+                      className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-gray-400 cursor-not-allowed"
                     />
                   </div>
                 </div>
@@ -911,7 +947,7 @@ _ResinCraft - Handmade Resin Art_`;
 
                 {/* Payment Logos */}
                 <div className="flex items-center gap-3 flex-wrap p-3 rounded-lg bg-white/5">
-                  <span className="text-xs text-gray-500 mr-2">We accept:</span>
+                  <span className="text-xs text-gray-300 mr-2">We accept:</span>
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="px-2 py-1 rounded bg-white/10 text-xs font-bold text-white">UPI</span>
                     <span className="px-2 py-1 rounded bg-blue-600/20 text-xs font-bold text-blue-300">VISA</span>
@@ -929,12 +965,12 @@ _ResinCraft - Handmade Resin Art_`;
                     <div className="flex items-center gap-3">
                       <input type="radio" checked={payment.method === "upi"} onChange={() => setPayment({ ...payment, method: "upi" })} className="w-4 h-4 accent-indigo-500" />
                       <div className="flex-1">
-                        <div className="font-medium flex items-center gap-2">
+                        <div className="font-medium flex items-center gap-2 text-white">
                           <i className="fas fa-mobile-alt text-indigo-400"></i>
                           UPI
                           <span className="ml-2 px-2 py-0.5 rounded bg-green-500/20 text-[10px] text-green-300 font-medium">RECOMMENDED</span>
                         </div>
-                        <p className="text-xs text-gray-500 mt-1">Pay using Google Pay, PhonePe, Paytm, or any UPI app</p>
+                        <p className="text-xs text-gray-300 mt-1">Pay directly from any UPI app, or enter a UPI ID manually</p>
                       </div>
                       <div className="flex gap-1">
                         <span className="w-8 h-5 rounded bg-white/10 flex items-center justify-center text-[8px] font-bold text-white">GPay</span>
@@ -943,15 +979,67 @@ _ResinCraft - Handmade Resin Art_`;
                       </div>
                     </div>
                     {payment.method === "upi" && (
-                      <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} className="mt-4">
-                        <input
-                          type="text"
-                          value={payment.upiId || ""}
-                          onChange={(e) => setPayment({ ...payment, upiId: e.target.value })}
-                          className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.upiId ? "border-red-500" : "border-white/10"} text-white focus:outline-none focus:border-indigo-500 transition-colors`}
-                          placeholder="yourname@upi"
-                        />
-                        {errors.upiId && <p className="text-red-400 text-xs mt-1">{errors.upiId}</p>}
+                      <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} className="mt-4 space-y-4" onClick={(e) => e.stopPropagation()}>
+                        {/* Toggle: Pay via app vs manual UPI ID */}
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setPayment({ ...payment, upiMode: "app" })}
+                            className={`px-3 py-2.5 rounded-xl text-sm font-medium border transition-colors ${payment.upiMode === "app" ? "bg-indigo-500/20 border-indigo-500/60 text-white" : "bg-white/5 border-white/10 text-gray-300 hover:text-white"}`}
+                          >
+                            <i className="fas fa-mobile-alt mr-2 text-indigo-300"></i>Open &amp; Pay via UPI App
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPayment({ ...payment, upiMode: "manual" })}
+                            className={`px-3 py-2.5 rounded-xl text-sm font-medium border transition-colors ${payment.upiMode === "manual" ? "bg-indigo-500/20 border-indigo-500/60 text-white" : "bg-white/5 border-white/10 text-gray-300 hover:text-white"}`}
+                          >
+                            <i className="fas fa-keyboard mr-2 text-indigo-300"></i>Pay Manually via UPI ID
+                          </button>
+                        </div>
+
+                        {payment.upiMode === "app" ? (
+                          <div>
+                            <p className="text-xs text-gray-300 mb-2">Choose your UPI app — it will open directly to complete the payment of <span className="text-white font-semibold">{formatINR(total)}</span>:</p>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                              {UPI_APPS.map((app) => (
+                                <button
+                                  key={app.id}
+                                  type="button"
+                                  onClick={() => setPayment({ ...payment, upiApp: app.id })}
+                                  className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border text-left transition-all ${payment.upiApp === app.id ? "bg-indigo-500/20 border-indigo-500/60 ring-1 ring-indigo-400/50" : "bg-white/5 border-white/10 hover:border-white/30"}`}
+                                >
+                                  <span className={`w-8 h-8 rounded-lg ${app.bg} flex items-center justify-center`}>
+                                    <i className={`${app.icon} ${app.color}`}></i>
+                                  </span>
+                                  <span className="text-xs font-medium text-white leading-tight">{app.name}</span>
+                                  {payment.upiApp === app.id && <i className="fas fa-check-circle text-indigo-300 ml-auto text-sm"></i>}
+                                </button>
+                              ))}
+                            </div>
+                            {errors.upiApp && <p className="text-red-400 text-xs mt-2">{errors.upiApp}</p>}
+                            <p className="text-[11px] text-gray-300 mt-2">
+                              <i className="fas fa-info-circle text-indigo-300 mr-1"></i>
+                              On mobile, the selected app opens automatically. On desktop, a UPI QR code / deep link is shown in your UPI app.
+                            </p>
+                          </div>
+                        ) : (
+                          <div>
+                            <label className="block text-xs text-gray-300 mb-2">Payer's UPI ID — use this if you're paying from a different UPI ID / handle:</label>
+                            <input
+                              type="text"
+                              value={payment.upiId || ""}
+                              onChange={(e) => setPayment({ ...payment, upiId: e.target.value })}
+                              className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.upiId ? "border-red-500" : "border-white/10"} text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors`}
+                              placeholder="yourname@upi"
+                            />
+                            {errors.upiId && <p className="text-red-400 text-xs mt-1">{errors.upiId}</p>}
+                            <p className="text-[11px] text-gray-300 mt-2">
+                              <i className="fas fa-info-circle text-indigo-300 mr-1"></i>
+                              A collect request will be sent to this UPI ID for {formatINR(total)}. Approve it in your UPI app to complete payment.
+                            </p>
+                          </div>
+                        )}
                       </motion.div>
                     )}
                   </div>
@@ -965,7 +1053,7 @@ _ResinCraft - Handmade Resin Art_`;
                           <i className="fas fa-credit-card text-indigo-400"></i>
                           Credit / Debit Card
                         </div>
-                        <p className="text-xs text-gray-500 mt-1">Visa, Mastercard, RuPay, American Express</p>
+                        <p className="text-xs text-gray-300 mt-1">Visa, Mastercard, RuPay, American Express</p>
                       </div>
                       <div className="flex gap-1">
                         <span className="px-1.5 py-0.5 rounded bg-blue-600/20 text-[8px] font-bold text-blue-300">VISA</span>
@@ -979,7 +1067,7 @@ _ResinCraft - Handmade Resin Art_`;
                           type="text"
                           value={payment.cardNumber || ""}
                           onChange={(e) => setPayment({ ...payment, cardNumber: e.target.value })}
-                          className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.cardNumber ? "border-red-500" : "border-white/10"} text-white focus:outline-none focus:border-indigo-500 transition-colors`}
+                          className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.cardNumber ? "border-red-500" : "border-white/10"} text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors`}
                           placeholder="1234 5678 9012 3456"
                         />
                         {errors.cardNumber && <p className="text-red-400 text-xs mt-1">{errors.cardNumber}</p>}
@@ -987,7 +1075,7 @@ _ResinCraft - Handmade Resin Art_`;
                           type="text"
                           value={payment.cardName || ""}
                           onChange={(e) => setPayment({ ...payment, cardName: e.target.value })}
-                          className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.cardName ? "border-red-500" : "border-white/10"} text-white focus:outline-none focus:border-indigo-500 transition-colors`}
+                          className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.cardName ? "border-red-500" : "border-white/10"} text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors`}
                           placeholder="Cardholder Name"
                         />
                         {errors.cardName && <p className="text-red-400 text-xs mt-1">{errors.cardName}</p>}
@@ -996,14 +1084,14 @@ _ResinCraft - Handmade Resin Art_`;
                             type="text"
                             value={payment.cardExpiry || ""}
                             onChange={(e) => setPayment({ ...payment, cardExpiry: e.target.value })}
-                            className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.cardExpiry ? "border-red-500" : "border-white/10"} text-white focus:outline-none focus:border-indigo-500 transition-colors`}
+                            className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.cardExpiry ? "border-red-500" : "border-white/10"} text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors`}
                             placeholder="MM/YY"
                           />
                           <input
                             type="text"
                             value={payment.cardCvv || ""}
                             onChange={(e) => setPayment({ ...payment, cardCvv: e.target.value })}
-                            className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.cardCvv ? "border-red-500" : "border-white/10"} text-white focus:outline-none focus:border-indigo-500 transition-colors`}
+                            className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.cardCvv ? "border-red-500" : "border-white/10"} text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors`}
                             placeholder="CVV"
                           />
                         </div>
@@ -1023,7 +1111,7 @@ _ResinCraft - Handmade Resin Art_`;
                           Net Banking
                           <span className="ml-2 px-2 py-0.5 rounded bg-blue-500/20 text-[10px] text-blue-300 font-medium">47+ BANKS</span>
                         </div>
-                        <p className="text-xs text-gray-500 mt-1">All major Indian banks supported</p>
+                        <p className="text-xs text-gray-300 mt-1">All major Indian banks supported</p>
                       </div>
                       <div className="flex gap-1">
                         <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-[8px] font-bold text-blue-300">SBI</span>
@@ -1036,7 +1124,7 @@ _ResinCraft - Handmade Resin Art_`;
                         <select
                           value={payment.bank || ""}
                           onChange={(e) => setPayment({ ...payment, bank: e.target.value })}
-                          className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.bank ? "border-red-500" : "border-white/10"} text-white focus:outline-none focus:border-indigo-500 transition-colors`}
+                          className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.bank ? "border-red-500" : "border-white/10"} text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors`}
                         >
                           <option value="" className="bg-[#0f0f23]">Select Bank</option>
                           <option value="sbi" className="bg-[#0f0f23]">State Bank of India</option>
@@ -1062,7 +1150,7 @@ _ResinCraft - Handmade Resin Art_`;
                           <i className="fas fa-wallet text-indigo-400"></i>
                           Wallet
                         </div>
-                        <p className="text-xs text-gray-500 mt-1">Paytm, PhonePe, Amazon Pay, Mobikwik</p>
+                        <p className="text-xs text-gray-300 mt-1">Paytm, PhonePe, Amazon Pay, Mobikwik</p>
                       </div>
                       <div className="flex gap-1">
                         <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-[8px] font-bold text-blue-300">Paytm</span>
@@ -1075,7 +1163,7 @@ _ResinCraft - Handmade Resin Art_`;
                         <select
                           value={payment.wallet || ""}
                           onChange={(e) => setPayment({ ...payment, wallet: e.target.value })}
-                          className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.wallet ? "border-red-500" : "border-white/10"} text-white focus:outline-none focus:border-indigo-500 transition-colors`}
+                          className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${errors.wallet ? "border-red-500" : "border-white/10"} text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 transition-colors`}
                         >
                           <option value="" className="bg-[#0f0f23]">Select Wallet</option>
                           <option value="paytm" className="bg-[#0f0f23]">Paytm Wallet</option>
@@ -1114,7 +1202,7 @@ _ResinCraft - Handmade Resin Art_`;
                       <img src={item.image} alt={item.name} className="w-16 h-16 rounded-lg object-cover" />
                       <div className="flex-1">
                         <h4 className="font-medium text-sm">{item.name}</h4>
-                        <p className="text-xs text-gray-500">Qty: {item.quantity}</p>
+                        <p className="text-xs text-gray-300">Qty: {item.quantity}</p>
                       </div>
                       <p className="text-indigo-300 font-semibold">{formatINR(item.price * item.quantity)}</p>
                     </div>
@@ -1132,7 +1220,7 @@ _ResinCraft - Handmade Resin Art_`;
                     {shipping.address}<br />
                     {shipping.city}, {shipping.state} - {shipping.pincode}<br />
                     {shipping.country}<br />
-                    <span className="text-gray-500">📞 {shipping.phone} • ✉️ {shipping.email}</span>
+                    <span className="text-gray-300">📞 {shipping.phone} • ✉️ {shipping.email}</span>
                   </p>
                 </div>
 
@@ -1142,12 +1230,27 @@ _ResinCraft - Handmade Resin Art_`;
                     <i className="fas fa-credit-card text-indigo-400"></i>
                     Payment Method
                   </h4>
-                  <p className="text-sm text-gray-400">
-                    {payment.method === "upi" && `UPI: ${payment.upiId}`}
+                  <p className="text-sm text-gray-300">
+                    {payment.method === "upi" && payment.upiMode === "app" && `UPI App: ${UPI_APPS.find((a) => a.id === payment.upiApp)?.name || "—"} (opens directly to pay)`}
+                    {payment.method === "upi" && payment.upiMode === "manual" && `UPI (Manual): ${payment.upiId}`}
                     {payment.method === "card" && `Card ending in ${payment.cardNumber?.slice(-4)}`}
                     {payment.method === "netbanking" && `Net Banking: ${payment.bank?.toUpperCase()}`}
                     {payment.method === "wallet" && `Wallet: ${payment.wallet?.toUpperCase()}`}
                   </p>
+                  {payment.method === "upi" && payment.upiMode === "app" && payment.upiApp && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const app = UPI_APPS.find((a) => a.id === payment.upiApp);
+                        window.location.href = buildUpiDeepLink(app?.name || "ResinCraft", total);
+                        addToast(`Opening ${app?.name} to complete your payment…`, "info");
+                      }}
+                      className="mt-3 w-full py-3 rounded-xl bg-indigo-500/20 border border-indigo-500/50 text-white font-medium hover:bg-indigo-500/30 transition-colors"
+                    >
+                      <i className={`fas fa-mobile-alt mr-2 text-indigo-300`}></i>
+                      Open {UPI_APPS.find((a) => a.id === payment.upiApp)?.name} &amp; Pay {formatINR(total)}
+                    </button>
+                  )}
                 </div>
 
                 {/* Price Breakdown */}
@@ -1217,8 +1320,14 @@ _ResinCraft - Handmade Resin Art_`;
                     <span>{orderDetails.date}</span>
                   </div>
                   <div className="flex justify-between items-center pb-3 border-b border-white/10">
-                    <span className="text-gray-400">Payment</span>
-                    <span className="capitalize">{orderDetails.payment.method}</span>
+                    <span className="text-gray-300">Payment</span>
+                    <span className="capitalize">
+                      {orderDetails.payment.method === "upi" && orderDetails.payment.upiMode === "app"
+                        ? `UPI • ${UPI_APPS.find((a) => a.id === orderDetails.payment.upiApp)?.name || "App"}`
+                        : orderDetails.payment.method === "upi"
+                        ? `UPI • ${orderDetails.payment.upiId}`
+                        : orderDetails.payment.method}
+                    </span>
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="text-gray-400">Total Amount</span>
@@ -1235,7 +1344,7 @@ _ResinCraft - Handmade Resin Art_`;
                   </p>
                 </div>
 
-                <p className="text-sm text-gray-500">
+                <p className="text-sm text-gray-300">
                   A confirmation email has been sent to {orderDetails.shipping.email}
                 </p>
 
@@ -1507,7 +1616,7 @@ function AboutSection() {
               ].map((stat) => (
                 <div key={stat.label}>
                   <div className="text-2xl font-bold text-gradient">{stat.number}</div>
-                  <div className="text-xs text-gray-500 mt-1">{stat.label}</div>
+                  <div className="text-xs text-gray-300 mt-1">{stat.label}</div>
                 </div>
               ))}
             </div>
@@ -1550,7 +1659,7 @@ function ProcessSection() {
               <div className="w-14 h-14 rounded-full bg-gradient-to-br from-indigo-500/20 to-pink-500/20 flex items-center justify-center mx-auto mb-6 group-hover:scale-110 transition-transform duration-500">
                 <i className={`${step.icon} text-xl text-indigo-400`}></i>
               </div>
-              <div className="text-xs text-gray-600 mb-2">Step {String(i + 1).padStart(2, "0")}</div>
+              <div className="text-xs text-gray-300 mb-2">Step {String(i + 1).padStart(2, "0")}</div>
               <h3 className="text-lg font-semibold mb-3">{step.title}</h3>
               <p className="text-sm text-gray-400 leading-relaxed">{step.description}</p>
             </motion.div>
@@ -1590,7 +1699,7 @@ function TestimonialsSection() {
               <p className="text-gray-300 leading-relaxed mb-6 italic">"{t.text}"</p>
               <div>
                 <div className="font-semibold">{t.name}</div>
-                <div className="text-sm text-gray-500">{t.role}</div>
+                <div className="text-sm text-gray-300">{t.role}</div>
               </div>
             </motion.div>
           ))}
@@ -1635,7 +1744,7 @@ function CTASection() {
               {subscribed ? "✓ Subscribed!" : "Join Waitlist"}
             </button>
           </motion.form>
-          <motion.p variants={fadeInUp} className="text-xs text-gray-600 mt-4">
+          <motion.p variants={fadeInUp} className="text-xs text-gray-300 mt-4">
             No spam. Unsubscribe anytime. We respect your privacy.
           </motion.p>
         </motion.div>
@@ -1680,12 +1789,12 @@ function Footer() {
               </div>
               <span className="text-xl font-bold tracking-tight">RESIN<span className="text-gradient">CRAFT</span></span>
             </div>
-            <p className="text-sm text-gray-500 leading-relaxed">
+            <p className="text-sm text-gray-300 leading-relaxed">
               Handmade epoxy resin art for those who appreciate unique, colorful, and stunning decor pieces.
             </p>
             <div className="flex items-center gap-4 mt-4">
               {["fab fa-instagram", "fab fa-pinterest", "fab fa-youtube", "fab fa-facebook"].map((icon, i) => (
-                <button key={i} onClick={() => addToast("Follow us on social media!", "info")} className="w-9 h-9 rounded-full bg-white/5 flex items-center justify-center text-gray-500 hover:text-indigo-400 hover:bg-indigo-500/10 transition-all">
+                <button key={i} onClick={() => addToast("Follow us on social media!", "info")} className="w-9 h-9 rounded-full bg-white/5 flex items-center justify-center text-gray-300 hover:text-indigo-400 hover:bg-indigo-500/10 transition-all">
                   <i className={`${icon} text-sm`}></i>
                 </button>
               ))}
@@ -1702,7 +1811,7 @@ function Footer() {
               <ul className="space-y-2">
                 {col.links.map((link) => (
                   <li key={link}>
-                    <button onClick={(e) => handleFooterLink(e, link)} className="text-sm text-gray-500 hover:text-indigo-300 transition-colors">
+                    <button onClick={(e) => handleFooterLink(e, link)} className="text-sm text-gray-300 hover:text-indigo-300 transition-colors">
                       {link}
                     </button>
                   </li>
@@ -1713,11 +1822,11 @@ function Footer() {
         </div>
 
         <div className="border-t border-white/5 pt-8 flex flex-col md:flex-row items-center justify-between gap-4">
-          <p className="text-xs text-gray-600">© 2026 ResinCraft. All rights reserved. Every piece is one-of-a-kind.</p>
+          <p className="text-xs text-gray-300">© 2026 ResinCraft. All rights reserved. Every piece is one-of-a-kind.</p>
           <div className="flex items-center gap-6">
-            <button onClick={() => addToast("Privacy Policy page coming soon!", "info")} className="text-xs text-gray-600 hover:text-gray-400 transition-colors">Privacy</button>
-            <button onClick={() => addToast("Terms of Service page coming soon!", "info")} className="text-xs text-gray-600 hover:text-gray-400 transition-colors">Terms</button>
-            <span className="text-xs text-gray-600">Payments via UPI, Cards & Net Banking</span>
+            <button onClick={() => addToast("Privacy Policy page coming soon!", "info")} className="text-xs text-gray-300 hover:text-white transition-colors">Privacy</button>
+            <button onClick={() => addToast("Terms of Service page coming soon!", "info")} className="text-xs text-gray-300 hover:text-white transition-colors">Terms</button>
+            <span className="text-xs text-gray-300">Payments via UPI, Cards & Net Banking</span>
           </div>
         </div>
       </div>
@@ -1905,7 +2014,7 @@ function AdminAccess() {
                   <i className="fas fa-shield-alt text-white text-2xl"></i>
                 </div>
                 <h2 className="text-2xl font-bold mb-2">Admin Login</h2>
-                <p className="text-sm text-gray-500">Enter password to access admin panel</p>
+                <p className="text-sm text-gray-300">Enter password to access admin panel</p>
               </div>
 
               {isLocked() ? (
@@ -1914,7 +2023,7 @@ function AdminAccess() {
                     <i className="fas fa-lock text-red-400 text-xl"></i>
                   </div>
                   <p className="text-red-400 font-medium mb-2">Account Locked</p>
-                  <p className="text-sm text-gray-500">
+                  <p className="text-sm text-gray-300">
                     Too many failed attempts. Try again in{" "}
                     <span className="text-white font-semibold">
                       {Math.ceil((lockedUntil! - Date.now()) / 60000)} minutes
@@ -1924,12 +2033,12 @@ function AdminAccess() {
               ) : (
                 <form onSubmit={handleLogin} className="space-y-4">
                   <div>
-                    <label className="block text-sm text-gray-400 mb-2">Password</label>
+                    <label className="block text-sm text-gray-300 mb-2">Password</label>
                     <input
                       type="password"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+                      className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
                       placeholder="Enter admin password"
                       autoFocus
                       disabled={isLocked()}
@@ -1952,7 +2061,7 @@ function AdminAccess() {
               )}
 
               <div className="mt-6 pt-4 border-t border-white/5">
-                <p className="text-xs text-gray-600 text-center mb-2">
+                <p className="text-xs text-gray-300 text-center mb-2">
                   <i className="fas fa-info-circle mr-1"></i>
                   Security: {ADMIN_CONFIG.sessionTimeout}min session timeout • {ADMIN_CONFIG.maxAttempts} max attempts
                 </p>

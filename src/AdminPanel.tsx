@@ -187,7 +187,7 @@ export default function AdminPanel({ onClose }: { onClose: () => void }) {
             </div>
             <div>
               <h1 className="text-xl font-bold">ResinCraft Admin</h1>
-              <p className="text-xs text-gray-500">Manage your store</p>
+              <p className="text-xs text-gray-300">Manage your store</p>
             </div>
           </div>
           <button
@@ -208,7 +208,7 @@ export default function AdminPanel({ onClose }: { onClose: () => void }) {
               className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-all whitespace-nowrap ${
                 activeTab === tab.id
                   ? "border-indigo-500 text-indigo-300"
-                  : "border-transparent text-gray-500 hover:text-gray-300"
+                  : "border-transparent text-gray-300 hover:text-gray-300"
               }`}
             >
               <i className={tab.icon}></i>
@@ -283,7 +283,7 @@ function DashboardView({
     <div className="space-y-8">
       <div>
         <h2 className="text-3xl font-bold mb-2">Dashboard</h2>
-        <p className="text-gray-500">Welcome back! Here's your store overview.</p>
+        <p className="text-gray-300">Welcome back! Here's your store overview.</p>
       </div>
 
       {/* Stats Grid */}
@@ -323,7 +323,7 @@ function DashboardView({
         <div className="glass-card rounded-2xl p-6">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold">Recent Orders</h3>
-            <span className="text-xs text-gray-500">Last 5 orders</span>
+            <span className="text-xs text-gray-300">Last 5 orders</span>
           </div>
           <div className="space-y-3">
             {recentOrders.map((order) => (
@@ -333,7 +333,7 @@ function DashboardView({
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium truncate">{order.customerName}</p>
-                  <p className="text-xs text-gray-500">{order.orderId}</p>
+                  <p className="text-xs text-gray-300">{order.orderId}</p>
                 </div>
                 <div className="text-right">
                   <p className="text-sm font-semibold">{formatINR(order.total)}</p>
@@ -351,7 +351,7 @@ function DashboardView({
             <span className="text-xs text-yellow-400">{lowStockProducts.length} items</span>
           </div>
           {lowStockProducts.length === 0 ? (
-            <div className="text-center py-8 text-gray-500">
+            <div className="text-center py-8 text-gray-300">
               <i className="fas fa-check-circle text-3xl text-green-400 mb-2"></i>
               <p>All products are well stocked!</p>
             </div>
@@ -362,11 +362,11 @@ function DashboardView({
                   <img src={product.image} alt={product.name} className="w-12 h-12 rounded-lg object-cover" />
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium truncate">{product.name}</p>
-                    <p className="text-xs text-gray-500">{formatINR(product.price)}</p>
+                    <p className="text-xs text-gray-300">{formatINR(product.price)}</p>
                   </div>
                   <div className="text-right">
                     <p className="text-sm font-bold text-yellow-400">{product.stock} left</p>
-                    <p className="text-xs text-gray-500">Restock soon</p>
+                    <p className="text-xs text-gray-300">Restock soon</p>
                   </div>
                 </div>
               ))}
@@ -388,7 +388,7 @@ function StatCard({ icon, label, value, color, change }: { icon: string; label: 
         <span className="text-xs text-green-400 bg-green-500/10 px-2 py-1 rounded-full">{change}</span>
       </div>
       <p className="text-2xl font-bold mb-1">{value}</p>
-      <p className="text-sm text-gray-500">{label}</p>
+      <p className="text-sm text-gray-300">{label}</p>
     </div>
   );
 }
@@ -448,7 +448,7 @@ function ProductsView({
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
           <h2 className="text-3xl font-bold mb-2">Products</h2>
-          <p className="text-gray-500">{products.length} total products • {products.filter((p) => p.active).length} active</p>
+          <p className="text-gray-300">{products.length} total products • {products.filter((p) => p.active).length} active</p>
         </div>
         <button
           onClick={() => setShowAddProduct(true)}
@@ -461,7 +461,7 @@ function ProductsView({
 
       {/* Search */}
       <div className="relative">
-        <i className="fas fa-search absolute left-4 top-1/2 -translate-y-1/2 text-gray-500"></i>
+        <i className="fas fa-search absolute left-4 top-1/2 -translate-y-1/2 text-gray-300"></i>
         <input
           type="text"
           value={searchTerm}
@@ -485,10 +485,10 @@ function ProductsView({
             </div>
             <div className="p-4">
               <h3 className="font-semibold mb-1">{product.name}</h3>
-              <p className="text-xs text-gray-500 mb-2">{product.medium} • {product.size}</p>
+              <p className="text-xs text-gray-300 mb-2">{product.medium} • {product.size}</p>
               <div className="flex items-center justify-between mb-3">
                 <span className="text-lg font-bold text-gradient">{formatINR(product.price)}</span>
-                <span className="text-xs text-gray-500">Stock: {product.stock}</span>
+                <span className="text-xs text-gray-300">Stock: {product.stock}</span>
               </div>
               <div className="flex gap-2">
                 <button
@@ -602,7 +602,7 @@ function ProductFormModal({
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
                 required
-                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
                 placeholder="e.g., Ocean Wave Resin Art"
               />
             </div>
@@ -614,7 +614,7 @@ function ProductFormModal({
                 value={form.price}
                 onChange={(e) => setForm({ ...form, price: Number(e.target.value) })}
                 required
-                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
               />
             </div>
 
@@ -624,7 +624,7 @@ function ProductFormModal({
                 type="number"
                 value={form.stock}
                 onChange={(e) => setForm({ ...form, stock: Number(e.target.value) })}
-                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
               />
             </div>
 
@@ -634,7 +634,7 @@ function ProductFormModal({
                 type="text"
                 value={form.medium}
                 onChange={(e) => setForm({ ...form, medium: e.target.value })}
-                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
                 placeholder="e.g., Epoxy Resin on Wood"
               />
             </div>
@@ -645,7 +645,7 @@ function ProductFormModal({
                 type="text"
                 value={form.size}
                 onChange={(e) => setForm({ ...form, size: e.target.value })}
-                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
                 placeholder='e.g., 24" × 18"'
               />
             </div>
@@ -655,7 +655,7 @@ function ProductFormModal({
               <select
                 value={form.tag}
                 onChange={(e) => setForm({ ...form, tag: e.target.value })}
-                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
               >
                 <option value="New" className="bg-[#0f0f23]">New</option>
                 <option value="Bestseller" className="bg-[#0f0f23]">Bestseller</option>
@@ -671,7 +671,7 @@ function ProductFormModal({
               <select
                 value={form.active ? "yes" : "no"}
                 onChange={(e) => setForm({ ...form, active: e.target.value === "yes" })}
-                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
               >
                 <option value="yes" className="bg-[#0f0f23]">Yes - Show on website</option>
                 <option value="no" className="bg-[#0f0f23]">No - Hide from website</option>
@@ -684,7 +684,7 @@ function ProductFormModal({
                 type="url"
                 value={form.image}
                 onChange={(e) => setForm({ ...form, image: e.target.value })}
-                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
                 placeholder="https://..."
               />
             </div>
@@ -695,7 +695,7 @@ function ProductFormModal({
                 value={form.description}
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
                 rows={3}
-                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500 resize-none"
+                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 resize-none"
                 placeholder="Describe your product..."
               />
             </div>
@@ -744,7 +744,7 @@ function OrdersView({
     <div className="space-y-6">
       <div>
         <h2 className="text-3xl font-bold mb-2">Orders</h2>
-        <p className="text-gray-500">{orders.length} total orders</p>
+        <p className="text-gray-300">{orders.length} total orders</p>
       </div>
 
       {/* Filter Tabs */}
@@ -765,7 +765,7 @@ function OrdersView({
       {/* Orders List */}
       <div className="space-y-3">
         {filteredOrders.length === 0 ? (
-          <div className="text-center py-16 text-gray-500">
+          <div className="text-center py-16 text-gray-300">
             <i className="fas fa-inbox text-4xl mb-3"></i>
             <p>No orders found</p>
           </div>
@@ -783,14 +783,14 @@ function OrdersView({
                     <OrderStatusBadge status={order.status} />
                   </div>
                   <p className="font-medium">{order.customerName}</p>
-                  <p className="text-xs text-gray-500">{order.email} • {order.phone}</p>
+                  <p className="text-xs text-gray-300">{order.email} • {order.phone}</p>
                 </div>
                 <div className="flex items-center gap-6">
                   <div className="text-right">
                     <p className="text-lg font-bold text-gradient">{formatINR(order.total)}</p>
-                    <p className="text-xs text-gray-500">{order.items.length} item(s)</p>
+                    <p className="text-xs text-gray-300">{order.items.length} item(s)</p>
                   </div>
-                  <div className="text-right text-xs text-gray-500">
+                  <div className="text-right text-xs text-gray-300">
                     <p>{order.date}</p>
                     <p className="capitalize">{order.paymentMethod}</p>
                   </div>
@@ -856,7 +856,7 @@ function OrderDetailModal({
             <select
               value={order.status}
               onChange={(e) => onUpdateStatus(e.target.value as AdminOrder["status"])}
-              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
             >
               <option value="pending" className="bg-[#0f0f23]">Pending</option>
               <option value="confirmed" className="bg-[#0f0f23]">Confirmed</option>
@@ -874,19 +874,19 @@ function OrderDetailModal({
             </h3>
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div>
-                <p className="text-gray-500">Name</p>
+                <p className="text-gray-300">Name</p>
                 <p className="font-medium">{order.customerName}</p>
               </div>
               <div>
-                <p className="text-gray-500">Phone</p>
+                <p className="text-gray-300">Phone</p>
                 <p className="font-medium">{order.phone}</p>
               </div>
               <div className="col-span-2">
-                <p className="text-gray-500">Email</p>
+                <p className="text-gray-300">Email</p>
                 <p className="font-medium">{order.email}</p>
               </div>
               <div className="col-span-2">
-                <p className="text-gray-500">Address</p>
+                <p className="text-gray-300">Address</p>
                 <p className="font-medium">{order.address}</p>
               </div>
             </div>
@@ -903,7 +903,7 @@ function OrderDetailModal({
                 <div key={i} className="flex justify-between items-center p-2 rounded-lg bg-white/5">
                   <div>
                     <p className="text-sm font-medium">{item.name}</p>
-                    <p className="text-xs text-gray-500">Qty: {item.quantity} × {formatINR(item.price)}</p>
+                    <p className="text-xs text-gray-300">Qty: {item.quantity} × {formatINR(item.price)}</p>
                   </div>
                   <p className="font-semibold">{formatINR(item.price * item.quantity)}</p>
                 </div>
@@ -919,11 +919,11 @@ function OrderDetailModal({
           <div className="glass-card rounded-xl p-4">
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div>
-                <p className="text-gray-500">Payment Method</p>
+                <p className="text-gray-300">Payment Method</p>
                 <p className="font-medium capitalize">{order.paymentMethod}</p>
               </div>
               <div>
-                <p className="text-gray-500">Order Date</p>
+                <p className="text-gray-300">Order Date</p>
                 <p className="font-medium">{order.date}</p>
               </div>
             </div>
@@ -973,7 +973,7 @@ function SettingsView({
     <div className="space-y-6 max-w-3xl">
       <div>
         <h2 className="text-3xl font-bold mb-2">Settings</h2>
-        <p className="text-gray-500">Configure your store and payment gateway</p>
+        <p className="text-gray-300">Configure your store and payment gateway</p>
       </div>
 
       {/* Payment Gateway */}
@@ -995,7 +995,7 @@ function SettingsView({
               type="text"
               value={settings.razorpayKeyId}
               onChange={(e) => setSettings({ ...settings, razorpayKeyId: e.target.value })}
-              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500 font-mono text-sm"
+              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 font-mono text-sm"
               placeholder="rzp_test_XXXXXXXXXXXXXX"
             />
           </div>
@@ -1005,7 +1005,7 @@ function SettingsView({
               type="password"
               value={settings.razorpayKeySecret}
               onChange={(e) => setSettings({ ...settings, razorpayKeySecret: e.target.value })}
-              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500 font-mono text-sm"
+              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 font-mono text-sm"
               placeholder="••••••••••••••••"
             />
           </div>
@@ -1025,7 +1025,7 @@ function SettingsView({
               type="text"
               value={settings.merchantName}
               onChange={(e) => setSettings({ ...settings, merchantName: e.target.value })}
-              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
             />
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1035,7 +1035,7 @@ function SettingsView({
                 type="email"
                 value={settings.merchantEmail}
                 onChange={(e) => setSettings({ ...settings, merchantEmail: e.target.value })}
-                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
               />
             </div>
             <div>
@@ -1044,7 +1044,7 @@ function SettingsView({
                 type="tel"
                 value={settings.merchantPhone}
                 onChange={(e) => setSettings({ ...settings, merchantPhone: e.target.value })}
-                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+                className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
               />
             </div>
           </div>
@@ -1054,7 +1054,7 @@ function SettingsView({
               type="tel"
               value={settings.whatsappNumber}
               onChange={(e) => setSettings({ ...settings, whatsappNumber: e.target.value })}
-              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
               placeholder="+919876543210"
             />
           </div>
@@ -1086,7 +1086,7 @@ function SettingsView({
               />
               <div>
                 <p className="font-medium">Enable Auto Notifications</p>
-                <p className="text-xs text-gray-500">Receive alerts when new orders come in</p>
+                <p className="text-xs text-gray-300">Receive alerts when new orders come in</p>
               </div>
             </label>
           </div>
@@ -1115,7 +1115,7 @@ function SettingsView({
                         WhatsApp (Opens WhatsApp Web/App)
                         <span className="ml-2 px-2 py-0.5 rounded bg-green-500/20 text-[10px] text-green-300">RECOMMENDED</span>
                       </p>
-                      <p className="text-xs text-gray-500">Automatically opens WhatsApp with order details - you just click Send</p>
+                      <p className="text-xs text-gray-300">Automatically opens WhatsApp with order details - you just click Send</p>
                     </div>
                   </label>
 
@@ -1133,7 +1133,7 @@ function SettingsView({
                         <i className="fas fa-envelope text-blue-400"></i>
                         Email Only
                       </p>
-                      <p className="text-xs text-gray-500">Send order details to your email</p>
+                      <p className="text-xs text-gray-300">Send order details to your email</p>
                     </div>
                   </label>
 
@@ -1151,7 +1151,7 @@ function SettingsView({
                         <i className="fas fa-bell text-purple-400"></i>
                         Both WhatsApp + Email
                       </p>
-                      <p className="text-xs text-gray-500">Get notified on both platforms</p>
+                      <p className="text-xs text-gray-300">Get notified on both platforms</p>
                     </div>
                   </label>
 
@@ -1189,7 +1189,7 @@ function SettingsView({
                         Webhook/API (Advanced)
                         <span className="ml-2 px-2 py-0.5 rounded bg-pink-500/20 text-[10px] text-pink-300">ADVANCED</span>
                       </p>
-                      <p className="text-xs text-gray-500">For developers - use Pipedream, Make.com, or custom webhook</p>
+                      <p className="text-xs text-gray-300">For developers - use Pipedream, Make.com, or custom webhook</p>
                     </div>
                   </label>
                 </div>
@@ -1216,10 +1216,10 @@ function SettingsView({
                       type="tel"
                       value={settings.whatsappNumber}
                       onChange={(e) => setSettings({ ...settings, whatsappNumber: e.target.value })}
-                      className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+                      className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
                       placeholder="+919876543210"
                     />
-                    <p className="text-xs text-gray-500 mt-1">Include country code (e.g., +91 for India)</p>
+                    <p className="text-xs text-gray-300 mt-1">Include country code (e.g., +91 for India)</p>
                   </div>
                   <div>
                     <label className="block text-sm text-gray-400 mb-2">CallMeBot API Key</label>
@@ -1227,10 +1227,10 @@ function SettingsView({
                       type="text"
                       value={settings.callmebotApiKey}
                       onChange={(e) => setSettings({ ...settings, callmebotApiKey: e.target.value })}
-                      className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500 font-mono text-sm"
+                      className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 font-mono text-sm"
                       placeholder="Your API key from CallMeBot"
                     />
-                    <p className="text-xs text-gray-500 mt-1">Get your free API key from callmebot.com (see guide)</p>
+                    <p className="text-xs text-gray-300 mt-1">Get your free API key from callmebot.com (see guide)</p>
                   </div>
                 </motion.div>
               )}
@@ -1256,7 +1256,7 @@ function SettingsView({
                       type="url"
                       value={settings.webhookURL}
                       onChange={(e) => setSettings({ ...settings, webhookURL: e.target.value })}
-                      className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500 font-mono text-sm"
+                      className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 font-mono text-sm"
                       placeholder="https://your-webhook-url.com/endpoint"
                     />
                   </div>
@@ -1270,10 +1270,10 @@ function SettingsView({
                     type="tel"
                     value={settings.whatsappNumber}
                     onChange={(e) => setSettings({ ...settings, whatsappNumber: e.target.value })}
-                    className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+                    className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
                     placeholder="+919876543210"
                   />
-                  <p className="text-xs text-gray-500 mt-1">Format: +91 followed by 10-digit number</p>
+                  <p className="text-xs text-gray-300 mt-1">Format: +91 followed by 10-digit number</p>
                 </div>
               )}
 
@@ -1284,7 +1284,7 @@ function SettingsView({
                     type="email"
                     value={settings.merchantEmail}
                     onChange={(e) => setSettings({ ...settings, merchantEmail: e.target.value })}
-                    className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+                    className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
                     placeholder="your@email.com"
                   />
                 </div>
@@ -1307,7 +1307,7 @@ function SettingsView({
               type="number"
               value={settings.shippingFreeAbove}
               onChange={(e) => setSettings({ ...settings, shippingFreeAbove: Number(e.target.value) })}
-              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
             />
           </div>
           <div>
@@ -1316,7 +1316,7 @@ function SettingsView({
               type="number"
               value={settings.shippingCharge}
               onChange={(e) => setSettings({ ...settings, shippingCharge: Number(e.target.value) })}
-              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
             />
           </div>
           <div>
@@ -1325,7 +1325,7 @@ function SettingsView({
               type="number"
               value={settings.gstPercent}
               onChange={(e) => setSettings({ ...settings, gstPercent: Number(e.target.value) })}
-              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
+              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
             />
           </div>
         </div>
@@ -1356,7 +1356,7 @@ function SettingsView({
               />
               <div>
                 <p className="font-medium">Enable Auto Email to Customers</p>
-                <p className="text-xs text-gray-500">Send invoice & order confirmation email automatically</p>
+                <p className="text-xs text-gray-300">Send invoice & order confirmation email automatically</p>
               </div>
             </label>
           </div>
@@ -1380,7 +1380,7 @@ function SettingsView({
                   type="text"
                   value={settings.emailjsServiceId}
                   onChange={(e) => setSettings({ ...settings, emailjsServiceId: e.target.value })}
-                  className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500 font-mono text-sm"
+                  className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 font-mono text-sm"
                   placeholder="service_xxxxxxxxxxx"
                 />
               </div>
@@ -1391,7 +1391,7 @@ function SettingsView({
                   type="text"
                   value={settings.emailjsTemplateId}
                   onChange={(e) => setSettings({ ...settings, emailjsTemplateId: e.target.value })}
-                  className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500 font-mono text-sm"
+                  className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 font-mono text-sm"
                   placeholder="template_xxxxxxxxxxx"
                 />
               </div>
@@ -1402,7 +1402,7 @@ function SettingsView({
                   type="text"
                   value={settings.emailjsPublicKey}
                   onChange={(e) => setSettings({ ...settings, emailjsPublicKey: e.target.value })}
-                  className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-indigo-500 font-mono text-sm"
+                  className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 font-mono text-sm"
                   placeholder="xxxxxxxxxxxxxxxxxxxxx"
                 />
               </div>

@@ -19,10 +19,12 @@
         width: 100%;
         height: 100%;
       }
+      /* App uses a dark design (#0f0f23 bg with light text) — keep it dark in every
+         environment so text never blends into the background */
       html.light,
       html.light body {
-        background-color: #ffffff !important;
-        color: #000000;
+        background-color: #0f0f23 !important;
+        color: #f8fafc !important;
       }
       html.dark,
       html.dark body {

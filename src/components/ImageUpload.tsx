@@ -65,9 +65,9 @@ export default function ImageUpload({ value, onChange, label = 'Product Image' }
           onClick={() => fileInputRef.current?.click()}
           className="border-2 border-dashed border-gray-600 rounded-lg p-8 text-center cursor-pointer hover:border-indigo-500 transition-colors"
         >
-          <i className="fas fa-cloud-upload-alt text-4xl text-gray-500 mb-3"></i>
+          <i className="fas fa-cloud-upload-alt text-4xl text-gray-300 mb-3"></i>
           <p className="text-sm text-gray-400 mb-1">Click to upload image</p>
-          <p className="text-xs text-gray-500">JPEG, PNG, WebP, GIF (max 10MB)</p>
+          <p className="text-xs text-gray-300">JPEG, PNG, WebP, GIF (max 10MB)</p>
         </div>
       ) : (
         // Preview area

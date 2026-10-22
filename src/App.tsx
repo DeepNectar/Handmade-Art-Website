@@ -35,19 +35,52 @@ const UPI_APPS = [
   { id: "any", name: "Any UPI App", icon: "fas fa-th-large", color: "text-cyan-300", bg: "bg-cyan-500/20", link: "upi://pay", badge: "Any" },
 ];
 
-// Build a standard UPI deep link (works with any UPI app on the device)
-const buildUpiDeepLink = (appName: string, amount: number) => {
+// Build a standard UPI deep link (works with any UPI app on the device).
+// NOTE: per the UPI spec, app-specific links must still carry the full pa/am/cu/tn
+// parameters, so we always start from "upi://pay" and only prefix the app scheme.
+const buildUpiDeepLink = (amount: number, appLink?: string) => {
   const savedSettings = JSON.parse(localStorage.getItem("admin_settings") || "{}");
   const merchantVpa = savedSettings.merchantUpiId || "resincraft@upi"; // set your real UPI ID in Admin > Settings
   const params = new URLSearchParams({
     pa: merchantVpa,
-    pn: appName,
+    pn: savedSettings.merchantName || "ResinCraft",
+    tr: "ResinCraft-" + Date.now(), // transaction reference (recommended by NPCI spec)
     am: String(amount),
     cu: "INR",
     tn: "ResinCraft Order Payment",
   });
-  return `upi://pay?${params.toString()}`;
+  const base = "upi://pay";
+  // If an app-specific scheme is configured (e.g. "phonepe://pay"), use it but keep params
+  const scheme = (appLink || base).split("?")[0];
+  return `${scheme}?${params.toString()}`;
 };
+
+// Reliable way to launch a UPI deep link without breaking the checkout SPA:
+// hidden iframe first (opens the native app without navigating away), then fall
+// back to a new tab, and finally same-tab navigation as a last resort.
+const openUpiLink = (link: string): boolean => {
+  try {
+    if (!/^upi:\/\/|^gpupi:\/\/|^phonepe:\/\/|^paytmmp:\/\/|^amazonpay:\/\//.test(link)) return false;
+    let frame = document.getElementById("upi-deeplink-frame") as HTMLIFrameElement | null;
+    if (!frame) {
+      frame = document.createElement("iframe");
+      frame.id = "upi-deeplink-frame";
+      frame.style.display = "none";
+      document.body.appendChild(frame);
+    }
+    frame.src = link;
+    // Fallback: if no app handled the scheme within a moment, try a new tab
+    setTimeout(() => {
+      try { window.open(link, "_blank"); } catch { /* popup blocked */ }
+    }, 600);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// Desktop users can't launch mobile UPI apps — show a scannable QR code instead.
+const upiQrUrl = (link: string) => `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=8&data=${encodeURIComponent(link)}`;
 
 // ==================== TYPES ====================
 interface CartItem {
@@ -570,10 +603,14 @@ function CheckoutModal() {
   // 📱 MERCHANT NOTIFICATION SYSTEM
   const sendMerchantNotification = async (order: OrderDetails) => {
     const savedSettings = JSON.parse(localStorage.getItem("admin_settings") || "{}");
+    // Respect the merchant's "auto notify" toggle — no popups/emails when it's off
+    if (savedSettings.autoNotifyMerchant === false) return;
     const merchantWhatsApp = savedSettings.whatsappNumber || "";
     const merchantEmail = savedSettings.merchantEmail || "";
     const notificationMethod = savedSettings.notificationMethod || "whatsapp_link";
     const callmebotApiKey = savedSettings.callmebotApiKey || "";
+    // Nothing to do if notifications are switched off entirely
+    if (notificationMethod === "none") return;
 
     // Build order message
     const itemsList = order.items.map((item) => `• ${item.name} x${item.quantity} = ₹${item.price * item.quantity}`).join("\n");
@@ -833,8 +870,8 @@ _ResinCraft - Handmade Resin Art_`;
       setOrderDetails(order);
       setIsProcessing(false);
       setStep(5); // "Awaiting payment confirmation" screen
-      window.location.href = buildUpiDeepLink(app?.name || "ResinCraft", total);
-      addToast(`Opening ${app?.name} to complete your payment…`, "info");
+      openUpiLink(buildUpiDeepLink(total, app?.link));
+      addToast(`Opening ${app?.name || "your UPI app"} to complete your payment…`, "info");
       return;
     }
 
@@ -1341,8 +1378,8 @@ _ResinCraft - Handmade Resin Art_`;
                       type="button"
                       onClick={() => {
                         const app = UPI_APPS.find((a) => a.id === payment.upiApp);
-                        window.location.href = buildUpiDeepLink(app?.name || "ResinCraft", total);
-                        addToast(`Opening ${app?.name} to complete your payment…`, "info");
+                        openUpiLink(buildUpiDeepLink(total, app?.link));
+                        addToast(`Opening ${app?.name || "your UPI app"} to complete your payment…`, "info");
                       }}
                       className="mt-3 w-full py-3 rounded-xl bg-indigo-500/20 border border-indigo-500/50 text-white font-medium hover:bg-indigo-500/30 transition-colors"
                     >
@@ -1376,7 +1413,7 @@ _ResinCraft - Handmade Resin Art_`;
                 {(!import.meta.env.VITE_RAZORPAY_KEY_ID || import.meta.env.VITE_RAZORPAY_KEY_ID === "rzp_test_XXXXXXXXXXXXXX") && (
                   <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20 flex items-center gap-2">
                     <i className="fas fa-info-circle text-yellow-400"></i>
-                    <span className="text-xs text-yellow-300">Demo Mode — Configure Razorpay keys in .env file for real payments. See PAYMENT_SETUP.md</span>
+                    <span className="text-xs text-yellow-300">Demo Mode — Configure Razorpay keys in .env (VITE_RAZORPAY_KEY_ID) or set your Merchant UPI ID in Admin → Settings for real payments.</span>
                   </div>
                 )}
 
@@ -1428,6 +1465,33 @@ _ResinCraft - Handmade Resin Art_`;
                   </div>
                 </div>
 
+                {/* Desktop / app-didn't-open fallback: scan-to-pay QR */}
+                <div className="glass-card rounded-xl p-4 flex flex-col sm:flex-row items-center gap-4">
+                  <img
+                    src={upiQrUrl(buildUpiDeepLink(orderDetails.total))}
+                    alt="UPI payment QR code"
+                    className="w-[180px] h-[180px] rounded-lg bg-white p-2 shrink-0"
+                  />
+                  <div className="text-left">
+                    <h4 className="font-medium mb-1">App didn't open? Scan to pay instead</h4>
+                    <p className="text-xs text-gray-300 leading-relaxed">
+                      Open any UPI app (Google Pay, PhonePe, Paytm, BHIM…) → <span className="text-white">Scan &amp; Pay</span> →
+                      scan this QR. It contains the exact amount ({formatINR(orderDetails.total)}) so you can't mistype it.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const link = buildUpiDeepLink(orderDetails.total);
+                        if (!openUpiLink(link)) window.location.href = link; // last-resort same-tab navigation
+                      }}
+                      className="mt-3 px-4 py-2 rounded-lg bg-white/5 border border-white/10 text-xs text-gray-200 hover:bg-white/10 transition-colors"
+                    >
+                      <i className="fas fa-sync-alt mr-1.5 text-indigo-300"></i>
+                      Copy-safe: retry opening the UPI link
+                    </button>
+                  </div>
+                </div>
+
                 <div className="p-3 rounded-lg bg-white/5 border border-white/10 flex items-start gap-2">
                   <i className="fas fa-lock text-green-400 mt-0.5"></i>
                   <span className="text-xs text-gray-300">
@@ -1439,7 +1503,8 @@ _ResinCraft - Handmade Resin Art_`;
                   <button
                     onClick={() => {
                       const app = UPI_APPS.find((a) => a.id === orderDetails.payment.upiApp);
-                      window.location.href = buildUpiDeepLink(app?.name || "ResinCraft", orderDetails.total);
+                      const link = buildUpiDeepLink(orderDetails.total, app?.link);
+                      if (!openUpiLink(link)) window.location.href = link; // last-resort same-tab navigation
                     }}
                     className="btn-secondary flex-1 py-3.5 rounded-full text-white font-medium"
                   >

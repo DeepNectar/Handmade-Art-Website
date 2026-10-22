@@ -32,6 +32,7 @@ interface AdminOrder {
 interface AdminSettings {
   razorpayKeyId: string;
   razorpayKeySecret: string;
+  merchantUpiId: string; // Merchant UPI/VPA — used by the checkout "Open & Pay via UPI App" deep links & QR
   merchantName: string;
   merchantEmail: string;
   merchantPhone: string;
@@ -125,6 +126,7 @@ const defaultOrders: AdminOrder[] = [
 const defaultSettings: AdminSettings = {
   razorpayKeyId: "",
   razorpayKeySecret: "",
+  merchantUpiId: "resincraft@upi",
   merchantName: "ResinCraft",
   merchantEmail: "support@resincraft.in",
   merchantPhone: "+919876543210",
@@ -1020,6 +1022,27 @@ function SettingsView({
               className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 font-mono text-sm"
               placeholder="••••••••••••••••"
             />
+          </div>
+          <div>
+            <label className="block text-sm text-gray-400 mb-2">Merchant UPI ID (VPA) — used for UPI deep links &amp; QR at checkout</label>
+            <input
+              type="text"
+              value={settings.merchantUpiId}
+              onChange={(e) => setSettings({ ...settings, merchantUpiId: e.target.value.trim() })}
+              className={`w-full px-4 py-3 rounded-xl bg-white/5 border ${
+                settings.merchantUpiId && !/^[a-zA-Z0-9._-]+@[a-zA-Z]+$/.test(settings.merchantUpiId)
+                  ? "border-red-500"
+                  : "border-white/10"
+              } text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500 font-mono text-sm`}
+              placeholder="yourstore@okhdfcbank / business@upi"
+            />
+            {settings.merchantUpiId && !/^[a-zA-Z0-9._-]+@[a-zA-Z]+$/.test(settings.merchantUpiId) ? (
+              <p className="text-red-400 text-xs mt-1">Invalid UPI ID format (example: name@bank)</p>
+            ) : (
+              <p className="text-gray-300 text-xs mt-1">
+                Customers pay this UPI ID directly when they choose "Open &amp; Pay via UPI App". Set your real, verified UPI ID here.
+              </p>
+            )}
           </div>
         </div>
       </div>

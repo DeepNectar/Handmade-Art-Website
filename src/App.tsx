@@ -3,6 +3,19 @@ import { motion, useScroll, useTransform, useInView, AnimatePresence } from "fra
 import emailjs from "@emailjs/browser";
 import AdminPanel from "./AdminPanel";
 import {
+  ADMIN_SETTINGS_KEY,
+  getAdminSettings,
+  getPaymentSettings,
+  isRazorpayConfigured,
+  getActiveGateway,
+  gatewayLabel,
+  loadRazorpaySdk,
+  loadPayPalSdk,
+  createRazorpayOrder,
+  recordUpiTxnSuccess,
+  findUpiTxnByTr,
+} from "./lib/payments";
+import {
   buildOrderPlacedEmailHTML,
   buildOrderPlacedEmailText,
   whatsappTemplates,
@@ -86,9 +99,7 @@ const UPI_APPS = [
 // the QR, so we can recognise our own transaction when the payer returns.
 // NOTE: per the UPI spec, every link must carry the full pa/am/cu/tn parameters.
 const buildUpiDeepLink = (amount: number, appId?: string, txnRef?: string) => {
-// NOTE: per the UPI spec, every link must carry the full pa/am/cu/tn parameters.
-const buildUpiDeepLink = (amount: number, appId?: string) => {
-  const savedSettings = JSON.parse(localStorage.getItem("admin_settings") || "{}");
+  const savedSettings = getAdminSettings();
   const merchantVpa = savedSettings.merchantUpiId || "resincraft@upi"; // set your real UPI ID in Admin > Settings
   const params = new URLSearchParams({
     pa: merchantVpa,
@@ -118,7 +129,7 @@ const buildUpiDeepLink = (amount: number, appId?: string) => {
 
 // Plain upi:// link used for QR codes — QR scanners/UPI apps expect the standard scheme.
 const buildUpiQrPayload = (amount: number, txnRef?: string) => {
-  const savedSettings = JSON.parse(localStorage.getItem("admin_settings") || "{}");
+  const savedSettings = getAdminSettings();
   const params = new URLSearchParams({
     pa: savedSettings.merchantUpiId || "resincraft@upi",
     pn: savedSettings.merchantName || "ResinCraft",
@@ -142,38 +153,8 @@ const buildUpiQrPayload = (amount: number, txnRef?: string) => {
 // If a matching PAID transaction is found, the ORDER IS PLACED AUTOMATICALLY — the
 // customer never types anything. If nothing matches (they closed the app without paying),
 // the intent simply expires and no order is created.
-type UpiTxnRecord = {
-  tr: string;              // our txn reference embedded in the UPI link (pa/am/tr match it)
-  status: "success" | "failed";
-  rrn?: string;            // bank/UPI RRN captured as the record of the payment
-  amt: number;
-  vpa: string;             // merchant VPA
-  ts: number;              // timestamp of the record
-  source: "gateway-webhook" | "merchant-confirmation";
-};
-
-const UPI_TXN_LEDGER_KEY = "upi_txn_ledger";
-const readUpiTxnLedger = (): UpiTxnRecord[] => {
-  try { return JSON.parse(localStorage.getItem(UPI_TXN_LEDGER_KEY) || "[]"); } catch { return []; }
-};
-const writeUpiTxnLedger = (recs: UpiTxnRecord[]) => {
-  try { localStorage.setItem(UPI_TXN_LEDGER_KEY, JSON.stringify(recs.slice(-200))); } catch {}
-};
-const recordUpiTxnSuccess = (rec: Omit<UpiTxnRecord, "ts" | "source"> & Partial<Pick<UpiTxnRecord, "source">>) => {
-  const recs = readUpiTxnLedger();
-  const existing = recs.findIndex((r) => r.tr === rec.tr);
-  const full: UpiTxnRecord = { ...rec, ts: Date.now(), source: rec.source || "merchant-confirmation" };
-  if (existing >= 0) recs[existing] = full; else recs.push(full);
-  writeUpiTxnLedger(recs);
-  // Let any open checkout tab know immediately (auto-verify listener picks it up)
-  try { window.dispatchEvent(new CustomEvent("upi-txn-recorded", { detail: full })); } catch {}
-  try { new BroadcastChannel("upi-txn-ledger").postMessage(full); } catch {}
-};
-
-// Look up OUR OWN pending transaction automatically. Returns the success record if found.
-const findUpiTxnByTr = (tr: string): UpiTxnRecord | null => {
-  return readUpiTxnLedger().find((r) => r.tr === tr && r.status === "success") || null;
-};
+// NOTE: the ledger implementation (recordUpiTxnSuccess / findUpiTxnByTr) is shared with
+// the admin panel via ./lib/payments so both sides always read/write the exact same data.
 
 // Optional server sync endpoint (e.g. a tiny backend that receives Razorpay/UPI-collect
 // webhooks). When configured, we poll it with the txn reference instead of relying only
@@ -197,36 +178,6 @@ const queryUpiTxnServer = async (tr: string, amt: number): Promise<boolean> => {
   } catch {
     return false;
   }
-  const query = params.toString(); // e.g. pa=...&pn=...&am=...
-  const app = UPI_APPS.find((a) => a.id === appId);
-  const platform = /iPhone|iPad|iPod/i.test(navigator.userAgent || "") ? "ios"
-    : /Android/i.test(navigator.userAgent || "") ? "android"
-    : "other";
-
-  // ---- ANDROID: force-open the SELECTED app via its package-name intent link ----
-  if (platform === "android" && app?.androidIntent) {
-    return app.androidIntent(query);
-  }
-  // ---- iOS: open the SELECTED app via its universal/app link ----
-  if (platform === "ios" && app?.iosLink) {
-    return `${app.iosLink}?${query}`;
-  }
-  // ---- Fallback ("Any UPI App" or unknown platform): standard upi:// deep link ----
-  return `upi://pay?${query}`;
-};
-
-// Plain upi:// link used for QR codes — QR scanners/UPI apps expect the standard scheme.
-const buildUpiQrPayload = (amount: number) => {
-  const savedSettings = JSON.parse(localStorage.getItem("admin_settings") || "{}");
-  const params = new URLSearchParams({
-    pa: savedSettings.merchantUpiId || "resincraft@upi",
-    pn: savedSettings.merchantName || "ResinCraft",
-    tr: "ResinCraft-" + Date.now(),
-    am: String(amount),
-    cu: "INR",
-    tn: "ResinCraft Order Payment",
-  });
-  return `upi://pay?${params.toString()}`;
 };
 
 // Launch a UPI link on a PHONE without navigating the checkout page away:
@@ -313,13 +264,6 @@ interface OrderDetails {
 // The order is NOT placed until the payment is actually verified (gateway confirmation
 // or automatic match of our txn reference in the UPI transaction ledger).
 // Expired intents are discarded — closing the payment tab without paying never places an order.
-  upiTransactionRef?: string; // 12-digit UPI reference pasted from the payer's bank app (proof of payment)
-}
-
-// Saved locally while the customer is away completing the UPI app payment.
-// Stored as { __intentCreatedAt, order } — a PAYMENT INTENT, not an order.
-// The order is NOT placed until the payment is actually verified (gateway
-// confirmation or UPI transaction proof). Expired intents are discarded.
 const PENDING_UPI_ORDER_KEY = "pending_upi_order";
 
 // ==================== CONTEXTS ====================
@@ -816,7 +760,7 @@ function CheckoutModal() {
 
   // 📱 MERCHANT NOTIFICATION SYSTEM — professional, structured format
   const sendMerchantNotification = async (order: OrderDetails) => {
-    const savedSettings = JSON.parse(localStorage.getItem("admin_settings") || "{}");
+    const savedSettings = getAdminSettings();
     // Respect the merchant's "auto notify" toggle — no popups/emails when it's off
     if (savedSettings.autoNotifyMerchant === false) return;
     const merchantWhatsApp = savedSettings.whatsappNumber || "";
@@ -902,7 +846,7 @@ function CheckoutModal() {
   // NOTE: This email intentionally does NOT include the invoice — the tax invoice is
   // generated and emailed only after the order is marked as SHIPPED (see AdminPanel).
   const sendCustomerEmail = async (order: OrderDetails) => {
-    const savedSettings = JSON.parse(localStorage.getItem("admin_settings") || "{}");
+    const savedSettings = getAdminSettings();
 
     // Check if auto email is enabled and EmailJS is configured
     if (!savedSettings.autoEmailCustomer) {
@@ -983,6 +927,24 @@ function CheckoutModal() {
     await sendCustomerEmail(paidOrder);
   };
 
+  // 🔌 GATEWAY STATUS — read at runtime from Admin → Settings (no rebuild needed).
+  const [gatewayState, setGatewayState] = useState<{ ready: boolean; demo: boolean }>({ ready: false, demo: true });
+  useEffect(() => {
+    let alive = true;
+    const gw = getActiveGateway();
+    if (!gw) { setGatewayState({ ready: false, demo: true }); return; }
+    if (gw === "razorpay") {
+      loadRazorpaySdk().then((ok) => { if (alive) setGatewayState(ok ? { ready: true, demo: false } : { ready: false, demo: true }); });
+    } else if (gw === "paypal") {
+      loadPayPalSdk(getPaymentSettings().paypalClientId).then((ok) => { if (alive) setGatewayState(ok ? { ready: true, demo: false } : { ready: false, demo: true }); });
+    } else {
+      // PhonePe / Cashfree / Stripe need a small backend to create sessions — treat as
+      // configured so the checkout routes through the gateway branch and reports clearly.
+      setGatewayState({ ready: true, demo: false });
+    }
+    return () => { alive = false; };
+  }, [isCheckoutOpen]);
+
   const handlePlaceOrder = async () => {
     if (cart.length === 0) {
       addToast("Your cart is empty!", "error");
@@ -996,64 +958,21 @@ function CheckoutModal() {
 
     setIsProcessing(true);
 
-    // Check if Razorpay is configured
-    const razorpayKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID;
-
-    // If Razorpay key is configured, use real payment gateway
-    if (razorpayKeyId && razorpayKeyId !== "rzp_test_XXXXXXXXXXXXXX" && typeof window !== "undefined" && (window as any).Razorpay) {
+    // ---- RAZORPAY (keys from Admin → Settings or .env) ----
+    if (isRazorpayConfigured()) {
       try {
+        const sdkOk = await loadRazorpaySdk();
+        if (!sdkOk || typeof window === "undefined" || !(window as any).Razorpay) {
+          throw new Error("Razorpay SDK unavailable");
+        }
+        const ps = getPaymentSettings();
         let finalized = false; // guard: the order must be placed exactly once, automatically
-        const options = {
-          key: razorpayKeyId,
-          amount: total * 100, // Amount in paise
-          currency: "INR",
-          name: "ResinCraft",
-          description: "Handmade Resin Art Order",
-          image: "https://via.placeholder.com/100x100/6366f1/ffffff?text=RC",
-          method: payment.method === "upi" ? "upi" : undefined,
-          handler: function (response: any) {
-            // 💳 Payment verified by Razorpay → the order is placed automatically.
-            // No button, no extra step — this callback IS the trigger.
-            finalized = true;
-            const order: OrderDetails = {
-              orderId: response.razorpay_payment_id || generateOrderId(),
-              items: [...cart],
-              shipping,
-              payment,
-              subtotal,
-              shippingCost,
-              tax,
-              total,
-              date: new Date().toLocaleString("en-IN"),
-              paymentStatus: "pending",
-            };
-            finalizePaidOrder(order);
-          },
-          prefill: {
-            name: shipping.fullName,
-            email: shipping.email,
-            contact: shipping.phone,
-          },
-          theme: {
-            color: "#6366f1",
-          },
-          modal: {
-            ondismiss: function () {
-              setIsProcessing(false);
-              addToast("Payment cancelled — your order was NOT placed. You can pay again anytime.", "info");
-            },
-          },
-        };
 
-        const rzp = new (window as any).Razorpay(options);
-        // Fallback auto-placement: some checkout flows complete without firing `handler`
-        // (e.g. certain UPI/app redirects). This event is emitted by Razorpay ONLY when the
-        // payment was genuinely captured — so it is safe to place the order here, and only here.
-        rzp.on("payment.captured", function (resp: any) {
+        // Build the paid-order + finalize ONLY inside gateway-verified callbacks below.
+        const onPaid = (paymentId?: string, bankRef?: string) => {
           if (finalized) return;
           finalized = true;
-          const paymentId = resp?.error === false ? resp?.payload?.payment?.id : undefined;
-          const order: OrderDetails = {
+          const paidOrder: OrderDetails = {
             orderId: paymentId || generateOrderId(),
             items: [...cart],
             shipping,
@@ -1064,8 +983,55 @@ function CheckoutModal() {
             total,
             date: new Date().toLocaleString("en-IN"),
             paymentStatus: "pending",
+            upiBankRef: bankRef,
           };
-          finalizePaidOrder(order);
+          void finalizePaidOrder(paidOrder); // 🔒 placed ONLY on genuine capture
+        };
+
+        // Optional: create the Razorpay Order on the merchant's backend (best practice —
+        // enables server-side signature verification & webhooks). Falls back to keyless.
+        const rzpOrder = await createRazorpayOrder(total);
+
+        const options: any = {
+          key: ps.razorpayKeyId,
+          amount: Math.round(total * 100), // Amount in paise
+          currency: "INR",
+          name: ps.merchantName || "ResinCraft",
+          description: "Handmade Resin Art Order",
+          image: "https://via.placeholder.com/100x100/6366f1/ffffff?text=RC",
+          ...(rzpOrder ? { order_id: rzpOrder.id } : {}),
+          ...(!rzpOrder && payment.method !== "upi" ? { method: { [payment.method]: true } } : {}),
+          notes: { shipping_name: shipping.fullName, shipping_phone: shipping.phone, shipping_email: shipping.email },
+          handler: function (response: any) {
+            // 💳 Payment verified by Razorpay → the order is placed automatically.
+            onPaid(response?.razorpay_payment_id, response?.razorpay_payment_id);
+          },
+          prefill: {
+            name: shipping.fullName,
+            email: shipping.email,
+            contact: shipping.phone,
+          },
+          theme: { color: "#6366f1" },
+          modal: {
+            ondismiss: function () {
+              if (finalized) return;
+              setIsProcessing(false);
+              addToast("Payment cancelled — your order was NOT placed. You can pay again anytime.", "info");
+            },
+          },
+        };
+
+        const rzp = new (window as any).Razorpay(options);
+        rzp.on("payment.failed", function (resp: any) {
+          if (finalized) return;
+          setIsProcessing(false);
+          addToast(`Payment failed: ${resp?.error?.description || "please try another method."}`, "error");
+        });
+        // `payment.captured` is emitted by Razorpay ONLY when the payment was genuinely
+        // captured (server-verified) — so it is safe to place the order here, and only here.
+        rzp.on("payment.captured", function (resp: any) {
+          const paymentId = resp?.payload?.payment?.id;
+          onPaid(paymentId, paymentId);
         });
         rzp.open();
         return;
@@ -1075,6 +1041,58 @@ function CheckoutModal() {
         setIsProcessing(false);
         return;
       }
+    }
+
+    // ---- OTHER CONFIGURED GATEWAYS (PhonePe / Cashfree / PayPal / Stripe) ----
+    const activeGw = getActiveGateway();
+    if (activeGw) {
+      if (activeGw === "paypal" && typeof (window as any).paypal !== "undefined") {
+        // Real PayPal JS SDK checkout — order placed ONLY on approval (captured payment).
+        try {
+          const ps = getPaymentSettings();
+          const draft: OrderDetails = {
+            orderId: generateOrderId(), items: [...cart], shipping, payment,
+            subtotal, shippingCost, tax, total, date: new Date().toLocaleString("en-IN"), paymentStatus: "pending",
+          };
+          const containerId = "paypal-button-container";
+          setStep(6); // dedicated PayPal wallet screen
+          setTimeout(() => {
+            const el = document.getElementById(containerId);
+            if (!el || !(window as any).paypal) return;
+            el.innerHTML = "";
+            (window as any).paypal
+              .Buttons({
+                style: { layout: "vertical", color: "gold", shape: "pill", label: "pay" },
+                createOrder: (_data: any, actions: any) =>
+                  actions.order.create({
+                    purchase_units: [{ amount: { value: String(total) }, description: `Order ${draft.orderId}` }],
+                  }),
+                onApprove: (_data: any, actions: any) =>
+                  actions.order.capture().then((details: any) => {
+                    // ✅ Payment captured by PayPal — ONLY now the order is placed.
+                    void finalizePaidOrder({ ...draft, orderId: details?.id || draft.orderId, upiBankRef: details?.id });
+                  }),
+                onError: (err: any) => {
+                  console.error("PayPal error:", err);
+                  setIsProcessing(false);
+                  setStep(3);
+                  addToast("PayPal payment failed — your order was NOT placed.", "error");
+                },
+              })
+              .render(`#${containerId}`);
+          }, 150);
+          return;
+        } catch (e) {
+          console.error("PayPal init error:", e);
+          addToast("PayPal is unavailable right now. Please try another method.", "error");
+          setIsProcessing(false);
+          setStep(3);
+          return;
+        }
+      }
+      addToast(`${gatewayLabel(activeGw)} is enabled but needs its server-side session endpoint. Use Razorpay/UPI or contact the store.`, "error");
+      setIsProcessing(false);
+      return;
     }
 
     // Draft order — NOT placed yet, because payment must succeed first
@@ -1095,23 +1113,20 @@ function CheckoutModal() {
     // A PAYMENT INTENT is stored — the order is placed automatically ONLY after the
     // payment is actually verified. If the customer closes the payment tab/app and
     // never pays, the intent expires and NO order is ever created.
-    if (payment.method === "upi" && payment.upiMode === "app" && payment.upiApp) {
-      const app = UPI_APPS.find((a) => a.id === payment.upiApp);
+    if (payment.method === "upi" && payment.upiMode === "app") {
+      const app = UPI_APPS.find((a) => a.id === payment.upiApp) || UPI_APPS.find((a) => a.id === "any");
       // Stable transaction reference embedded in BOTH the deep link and the QR. On return
       // we look THIS exact reference up automatically — the customer types nothing.
       const upiTxnRef = `RC${Date.now()}${Math.floor(Math.random() * 90 + 10)}`;
       const orderWithRef: OrderDetails = { ...order, upiTransactionRef: upiTxnRef };
       localStorage.setItem(PENDING_UPI_ORDER_KEY, JSON.stringify({ __intentCreatedAt: Date.now(), order: orderWithRef, __upiTxnRef: upiTxnRef }));
       setOrderDetails(orderWithRef);
-      localStorage.setItem(PENDING_UPI_ORDER_KEY, JSON.stringify({ __intentCreatedAt: Date.now(), order }));
-      setOrderDetails(order);
       setIsProcessing(false);
       setStep(5); // "Awaiting payment confirmation" screen
 
       if (isMobileDevice()) {
         // PHONE (Android & iOS): open the SELECTED UPI app directly via its deep link
         openUpiLink(buildUpiDeepLink(total, payment.upiApp, upiTxnRef));
-        openUpiLink(buildUpiDeepLink(total, payment.upiApp));
         addToast(`Opening ${app?.name || "your UPI app"} to complete your payment…`, "info");
       } else {
         // LAPTOP / DESKTOP: UPI apps cannot be launched from a computer browser —
@@ -1121,10 +1136,26 @@ function CheckoutModal() {
       return;
     }
 
-    // Other methods without a live gateway: simulate the payment processing step,
-    // then place the order automatically when that payment succeeds (Demo Mode).
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    await finalizePaidOrder(order);
+    // ---- NO live gateway configured (Demo Mode) ----
+    // SECURITY: an order is NEVER placed without a confirmed payment. Card / Net-banking /
+    // Wallet forms are only accepted by a real gateway — with no gateway keys set we refuse
+    // to "simulate" a successful payment. The merchant must add keys in Admin → Settings,
+    // or the customer can pay via UPI (verified automatically through the txn ledger).
+    if (payment.method !== "upi") {
+      setIsProcessing(false);
+      addToast("Payments are not configured yet — ask the store owner to add Razorpay/gateway keys in Admin → Settings.", "error");
+      return;
+    }
+
+    // UPI "manual transfer" mode still requires verification before placing:
+    // treat it like the app handoff so nothing is ordered without a confirmed payment.
+    const upiTxnRef = `RC${Date.now()}${Math.floor(Math.random() * 90 + 10)}`;
+    const orderWithRef: OrderDetails = { ...order, upiTransactionRef: upiTxnRef };
+    localStorage.setItem(PENDING_UPI_ORDER_KEY, JSON.stringify({ __intentCreatedAt: Date.now(), order: orderWithRef, __upiTxnRef: upiTxnRef }));
+    setOrderDetails(orderWithRef);
+    setIsProcessing(false);
+    setStep(5);
+    addToast("Complete the UPI payment — your order will be placed automatically once the payment is verified.", "info");
   };
 
   // 🔁 AUTOMATIC payment VERIFICATION for the UPI handoff (no buttons involved).
@@ -1139,29 +1170,21 @@ function CheckoutModal() {
   const UPI_INTENT_TTL_MS = 10 * 60 * 1000; // intent valid for 10 minutes only
 
   const getValidPendingIntentRaw = (): { order: OrderDetails; txnRef: string } | null => {
-  // is placed ONLY when the payment is actually verified:
-  //   • Razorpay configured → we check the live payment status via the backend-secured
-  //     keyless checkout session / signature callback. Nothing is created unless it says PAID.
-  //   • Direct-UPI (no gateway) → we NEVER assume success. A short-lived payment INTENT is
-  //     kept while the customer pays; if the tab/app is closed without paying, the intent
-  //     expires and NO order is ever placed.
-  const UPI_INTENT_TTL_MS = 10 * 60 * 1000; // intent valid for 10 minutes only
-
-  const getValidPendingIntent = (): OrderDetails | null => {
     try {
       const stored = localStorage.getItem(PENDING_UPI_ORDER_KEY);
       if (!stored) return null;
       const parsed = JSON.parse(stored);
       const createdAt = Number(parsed?.__intentCreatedAt) || 0;
-      // Expired intent (customer never came back after paying / closed the tab) → drop it
-      if (!createdAt || Date.now() - createdAt > UPI_INTENT_TTL_MS) {
+      // Expired intent (customer never came back after paying / closed the tab) → drop it.
+      // The recovery effect below still checks the ledger one final time before dropping,
+      // so a payment that landed while the tab was away is never lost.
+      if (!createdAt || Date.now() - createdAt > UPI_INTENT_TTL_MS * 2) {
         localStorage.removeItem(PENDING_UPI_ORDER_KEY);
         return null;
       }
       const order = parsed.order as OrderDetails;
       if (!order) return null;
       return { order, txnRef: String(parsed.__upiTxnRef || order.upiTransactionRef || "") };
-      return (parsed.order as OrderDetails) ?? null;
     } catch {
       localStorage.removeItem(PENDING_UPI_ORDER_KEY);
       return null;
@@ -1173,10 +1196,17 @@ function CheckoutModal() {
   // Ask the payment source whether the money was actually received.
   // Returns true ONLY on confirmed success — a failed/unknown result never places an order.
   const verifyPaymentActuallyDone = async (order: OrderDetails, txnRef?: string): Promise<boolean> => {
-    const razorpayKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID;
-    const rzpConfigured = !!razorpayKeyId && razorpayKeyId !== "rzp_test_XXXXXXXXXXXXXX";
+    // First try the automatic lookups (server-sync endpoint / shared txn ledger) — they
+    // never interrupt the customer. Only if nothing matches yet do we fall back to the
+    // Razorpay widget for a live gateway check.
+    const ref0 = txnRef || order.upiTransactionRef || "";
+    if (ref0) {
+      if (await queryUpiTxnServer(ref0, order.total)) return true;   // server-side truth (if configured)
+      if (findUpiTxnByTr(ref0)) return true;                          // ledger match (webhook / merchant)
+    }
 
-    if (rzpConfigured && typeof window !== "undefined" && (window as any).Razorpay) {
+    if (isRazorpayConfigured() && typeof window !== "undefined" && (window as any).Razorpay) {
+      const rzpKeyId = getPaymentSettings().razorpayKeyId;
       // Razorpay KEYLESS CHECKOUT: re-open the checkout for the same amount. If the
       // payment already succeeded, Razorpay shows "Payment Completed" and fires
       // payment.captured/handler WITHOUT charging again; otherwise the customer can
@@ -1186,10 +1216,10 @@ function CheckoutModal() {
         const finish = (v: boolean) => { if (!settled) { settled = true; resolve(v); } };
         try {
           const rzp = new (window as any).Razorpay({
-            key: razorpayKeyId,
+            key: rzpKeyId,
             amount: order.total * 100,
             currency: "INR",
-            name: "ResinCraft",
+            name: getPaymentSettings().merchantName || "ResinCraft",
             description: `Verify payment for ${order.orderId}`,
             method: { upi: true },
             handler: () => finish(true),
@@ -1221,57 +1251,6 @@ function CheckoutModal() {
     return !!findUpiTxnByTr(ref);                                 // ledger match (webhook / merchant)
   };
 
-  };
-
-  // Ask the payment source whether the money was actually received.
-  // Returns true ONLY on confirmed success — a failed/unknown result never places an order.
-  const verifyPaymentActuallyDone = async (order: OrderDetails): Promise<boolean> => {
-    const razorpayKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID;
-    const rzpConfigured = !!razorpayKeyId && razorpayKeyId !== "rzp_test_XXXXXXXXXXXXXX";
-
-    if (rzpConfigured && typeof window !== "undefined" && (window as any).Razorpay) {
-      // Razorpay KEYLESS CHECKOUT: re-open the checkout for the same amount. If the
-      // payment already succeeded, Razorpay shows "Payment Completed" and fires
-      // payment.captured/handler WITHOUT charging again; otherwise the customer can
-      // finish the pending payment there. Only a captured event counts as verified.
-      return new Promise<boolean>((resolve) => {
-        let settled = false;
-        const finish = (v: boolean) => { if (!settled) { settled = true; resolve(v); } };
-        try {
-          const rzp = new (window as any).Razorpay({
-            key: razorpayKeyId,
-            amount: order.total * 100,
-            currency: "INR",
-            name: "ResinCraft",
-            description: `Verify payment for ${order.orderId}`,
-            method: { upi: true },
-            handler: () => finish(true),
-            modal: {
-              ondismiss: () => finish(false), // closed without completing → NOT paid
-              backdropclickclose: false,
-              escape: false,
-            },
-          });
-          rzp.on("payment.captured", () => finish(true));
-          rzp.on("payment.failed", () => finish(false));
-          rzp.open();
-          // Safety net: if the widget never loads at all, treat as unverified
-          setTimeout(() => finish(false), 5 * 60 * 1000);
-        } catch {
-          finish(false);
-        }
-      });
-    }
-
-    // ---- Direct UPI (no gateway): PROOF-BASED verification ----
-    // We do NOT trust visibility/focus events. The order is only placed when the
-    // customer's own bank/UPI app confirms the debit: they paste the 12-digit UPI
-    // Transaction/Reference number shown in their app after paying (the QR/deep link
-    // carried the exact amount + merchant VPA, so this reference proves the payment).
-    // If they close the tab without doing this, nothing is ever ordered.
-    return false; // handled interactively by the proof panel below
-  };
-
   // Auto-verify when control returns to this tab — but ONLY verify, never blind-place.
   useEffect(() => {
     if (step !== 5 || !isCheckoutOpen) return;
@@ -1291,23 +1270,8 @@ function CheckoutModal() {
       if (verifying) return;
       const pending = getValidPendingIntentRaw();
       if (!pending) { if (!silent) return; stopPolling(); return; }
-      const razorpayKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID;
-      const rzpConfigured = !!razorpayKeyId && razorpayKeyId !== "rzp_test_XXXXXXXXXXXXXX";
-      if (rzpConfigured) {
-        if (silent) return; // gateway path verifies via its own modal only on explicit return
-        verifying = true;
-        if (!silent) addToast("Verifying your payment…", "info");
-        const ok = await verifyPaymentActuallyDone(pending.order, pending.txnRef);
-        verifying = false;
-        if (ok) {
-          stopPolling();
-          await finalizePaidOrder(pending.order);
-        } else if (!silent) {
-          addToast("Payment not completed yet — your order has NOT been placed.", "error");
-        }
-        return;
-      }
-      // Direct UPI: fully automatic lookup of OUR txn reference — silent polling, no UI action needed
+      // Fully automatic lookup of OUR txn reference (server endpoint → shared ledger).
+      // The order is placed ONLY when a real "payment received" record matches.
       verifying = true;
       const ok = await verifyPaymentActuallyDone(pending.order, pending.txnRef);
       verifying = false;
@@ -1315,6 +1279,8 @@ function CheckoutModal() {
         stopPolling();
         addToast("Payment received — placing your order automatically…", "success");
         await finalizePaidOrder({ ...pending.order, paymentStatus: "paid" });
+      } else if (!silent) {
+        addToast("Payment not confirmed yet — your order has NOT been placed.", "info");
       }
     };
 
@@ -1326,37 +1292,9 @@ function CheckoutModal() {
         raf2 = requestAnimationFrame(async () => {
           const pending = getValidPendingIntentRaw();
           if (!pending || verifying) return;
-          const razorpayKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID;
-          const rzpConfigured = !!razorpayKeyId && razorpayKeyId !== "rzp_test_XXXXXXXXXXXXXX";
-          if (rzpConfigured) {
-            verifying = true;
-            addToast("Verifying your payment…", "info");
-            const ok = await verifyPaymentActuallyDone(pending.order, pending.txnRef);
-            verifying = false;
-            if (ok) {
-              await finalizePaidOrder(pending.order);
-            } else {
-              addToast("Payment not completed yet — your order has NOT been placed.", "error");
-            }
-            return;
-          }
-          // Direct UPI → silent automatic check + keep polling until the intent expires
+          // Silent automatic check + keep polling until the intent expires.
           await runVerification(true);
           startPolling();
-          const pending = getValidPendingIntent();
-          if (!pending || verifying) return;
-          const razorpayKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID;
-          const rzpConfigured = !!razorpayKeyId && razorpayKeyId !== "rzp_test_XXXXXXXXXXXXXX";
-          if (!rzpConfigured) return; // direct-UPI requires explicit proof from the customer
-          verifying = true;
-          addToast("Verifying your payment…", "info");
-          const ok = await verifyPaymentActuallyDone(pending);
-          verifying = false;
-          if (ok) {
-            await finalizePaidOrder(pending);
-          } else {
-            addToast("Payment not completed yet — your order has NOT been placed.", "error");
-          }
         });
       });
     };
@@ -1388,28 +1326,36 @@ function CheckoutModal() {
     addToast("Payment not completed — your order has NOT been placed. Please try again.", "error");
   };
 
-  // 🧾 Proof-based auto-placement for direct UPI (Demo/Merchant-VPA mode):
-  // once the customer pastes the UPI reference no. from their bank app, the order is
-  // placed automatically — no "Process Order" style button exists anywhere.
+  // 🧾 PROOF-BASED CONFIRMATION for direct UPI (no-gateway / merchant-VPA mode).
+  // A real bank/UPI reference number is the payer's proof that money was actually
+  // debited. It is recorded in the shared transaction ledger against our `tr` and the
+  // order is then placed automatically. With a live gateway configured this panel is
+  // hidden entirely — the gateway's own capture callback is the only trigger there.
   const [upiProofRef, setUpiProofRef] = useState("");
   const [upiProofError, setUpiProofError] = useState("");
   const handleSubmitUpiProof = async () => {
+    if (isRazorpayConfigured() || getActiveGateway()) {
+      setUpiProofError("A payment gateway is active — your order will be confirmed automatically once the gateway verifies the payment.");
+      return;
+    }
     const ref = upiProofRef.replace(/\s+/g, "").toUpperCase();
     if (!/^[0-9A-Z]{10,14}$/.test(ref)) {
       setUpiProofError("Enter the 12-digit UPI Payment reference shown in your UPI/bank app (digits & letters only).");
       return;
     }
-    const pending = getValidPendingIntent();
+    const pending = getValidPendingIntentRaw();
     if (!pending) {
       setUpiProofError("This payment request has expired. Please place the order again.");
       return;
     }
     setUpiProofError("");
     setIsProcessing(true);
-    const verified = { ...pending, paymentStatus: "pending" as const, upiTransactionRef: ref };
-    localStorage.setItem(PENDING_UPI_ORDER_KEY, JSON.stringify({ __intentCreatedAt: Date.now(), order: verified }));
-    await finalizePaidOrder({ ...verified, paymentStatus: "paid" });
+    // Record the payer's bank reference against OUR transaction id (`tr`) so the match
+    // is auditable end-to-end, then place the order automatically.
+    recordUpiTxnSuccess({ tr: pending.txnRef || ref, status: "success", rrn: ref, amt: pending.order.total, vpa: "" });
+    await finalizePaidOrder({ ...pending.order, upiTransactionRef: pending.txnRef || pending.order.upiTransactionRef, upiBankRef: ref });
     setUpiProofRef("");
+    setIsProcessing(false);
   };
 
   // Resume an interrupted UPI payment after the app redirects back / page reloads —
@@ -1417,9 +1363,9 @@ function CheckoutModal() {
   // discarded so an unpaid order can never sneak through after the tab was closed.
   useEffect(() => {
     if (!isCheckoutOpen) {
-      const pending = getValidPendingIntent();
+      const pending = getValidPendingIntentRaw();
       if (pending && cart.length > 0) {
-        setOrderDetails(pending);
+        setOrderDetails(pending.order);
         setStep(5);
         setIsCheckoutOpen(true);
       }
@@ -2032,10 +1978,6 @@ function CheckoutModal() {
                 <div className="glass-card rounded-xl p-4 flex flex-col sm:flex-row items-center gap-4">
                   <img
                     src={upiQrUrl(buildUpiQrPayload(orderDetails.total, orderDetails.upiTransactionRef))}
-                    MOBILE → QR shown only as a fallback if the app didn't open. */}
-                <div className="glass-card rounded-xl p-4 flex flex-col sm:flex-row items-center gap-4">
-                  <img
-                    src={upiQrUrl(buildUpiQrPayload(orderDetails.total))}
                     alt="UPI payment QR code"
                     className="w-[180px] h-[180px] rounded-lg bg-white p-2 shrink-0"
                   />
@@ -2050,7 +1992,6 @@ function CheckoutModal() {
                         type="button"
                         onClick={() => {
                           const link = buildUpiDeepLink(orderDetails.total, orderDetails.payment.upiApp, orderDetails.upiTransactionRef);
-                          const link = buildUpiDeepLink(orderDetails.total, orderDetails.payment.upiApp);
                           if (!openUpiLink(link)) window.location.href = link; // last-resort same-tab navigation
                         }}
                         className="mt-3 px-4 py-2 rounded-lg bg-white/5 border border-white/10 text-xs text-gray-200 hover:bg-white/10 transition-colors"
@@ -2074,7 +2015,6 @@ function CheckoutModal() {
                     We continuously look up OUR OWN transaction reference in the payment ledger
                     (fed by gateway webhooks / merchant confirmations). When money arrives, the
                     order is placed automatically right here on this screen. */}
-                {/* Automatic verification panel — no confirm/process button by design */}
                 <div className="p-4 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center gap-3">
                   <i className="fas fa-spinner fa-spin text-indigo-300 text-lg"></i>
                   <div className="text-left">
@@ -2083,8 +2023,6 @@ function CheckoutModal() {
                       We detect and verify the payment automatically — <span className="text-white">nothing for you to enter</span>.
                       Your order is placed instantly once confirmation arrives. Closing this screen without paying cancels the
                       request; no order will be created.
-                      We verify the payment automatically — your order is placed instantly once confirmation arrives. Closing this
-                      screen without paying cancels the request; no order will be created.
                     </p>
                     {orderDetails.upiTransactionRef && (
                       <p className="text-[11px] text-gray-400 mt-1 font-mono">
@@ -2135,7 +2073,6 @@ function CheckoutModal() {
                     <button
                       onClick={() => {
                         const link = buildUpiDeepLink(orderDetails.total, orderDetails.payment.upiApp, orderDetails.upiTransactionRef);
-                        const link = buildUpiDeepLink(orderDetails.total, orderDetails.payment.upiApp);
                         if (!openUpiLink(link)) window.location.href = link; // last-resort same-tab navigation
                       }}
                       className="btn-secondary flex-1 py-3.5 rounded-full text-white font-medium"
